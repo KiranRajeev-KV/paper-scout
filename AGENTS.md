@@ -630,11 +630,16 @@ clean:
 - [x] internal/llm/prompts/prompts.go
 
 ### Phase 5: Tools
-- [ ] internal/tools/semantic_scholar/*
-- [ ] internal/tools/arxiv/*
-- [ ] internal/tools/pdf/*
-- [ ] internal/tools/embedding/gemini.go
-- [ ] internal/tools/bibtex/generator.go
+- [x] internal/tools/semantic_scholar/client.go
+- [x] internal/tools/semantic_scholar/models.go
+- [x] internal/tools/semantic_scholar/rate_limiter.go
+- [x] internal/tools/arxiv/client.go
+- [x] internal/tools/arxiv/models.go
+- [x] internal/tools/pdf/downloader.go
+- [x] internal/tools/pdf/unstructured.go
+- [x] internal/tools/pdf/chunker.go
+- [x] internal/tools/embedding/gemini.go
+- [x] internal/tools/bibtex/generator.go
 
 ### Phase 6: Worker Pool
 - [ ] internal/worker/pool.go
