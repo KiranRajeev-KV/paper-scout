@@ -642,9 +642,9 @@ clean:
 - [x] internal/tools/bibtex/generator.go
 
 ### Phase 6: Worker Pool
-- [ ] internal/worker/pool.go
-- [ ] internal/worker/job.go
-- [ ] internal/worker/processor.go
+- [x] internal/worker/pool.go
+- [x] internal/worker/job.go
+- [x] internal/worker/processor.go
 
 ### Phase 7: Agents
 - [ ] internal/agent/query_expander.go
