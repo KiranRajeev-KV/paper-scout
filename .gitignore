@@ -47,11 +47,6 @@ Thumbs.db
 # Docker
 .docker/
 
-# Generated files (SQLC)
-/internal/storage/postgres/models.go
-/internal/storage/postgres/db.go
-/internal/storage/postgres/querier.go
-
 # Temporary files
 *.tmp
 *.temp

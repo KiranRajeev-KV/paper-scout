@@ -610,10 +610,12 @@ clean:
 - [x] internal/logger/logger.go
 
 ### Phase 2: Database
-- [ ] migrations/001_initial_schema.up.sql
-- [ ] sqlc.yaml
-- [ ] internal/storage/postgres/queries.sql
-- [ ] internal/storage/postgres/db.go
+- [x] migrations/001_initial_schema.up.sql
+- [x] migrations/001_initial_schema.down.sql
+- [x] sqlc.yaml
+- [x] internal/storage/postgres/queries.sql
+- [x] internal/storage/postgres/client.go
+- [x] SQLC generated files (models.go, db.go, querier.go, queries.sql.go)
 
 ### Phase 3: Infrastructure
 - [ ] internal/storage/redis/client.go
