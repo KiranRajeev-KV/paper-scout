@@ -618,10 +618,10 @@ clean:
 - [x] SQLC generated files (models.go, db.go, querier.go, queries.sql.go)
 
 ### Phase 3: Infrastructure
-- [ ] internal/storage/redis/client.go
-- [ ] internal/storage/redis/cache.go
-- [ ] internal/storage/redis/queue.go
-- [ ] internal/storage/qdrant/client.go
+- [x] internal/storage/redis/client.go
+- [x] internal/storage/redis/cache.go
+- [x] internal/storage/redis/queue.go
+- [x] internal/storage/qdrant/client.go
 
 ### Phase 4: LLM Layer
 - [ ] internal/llm/client.go
