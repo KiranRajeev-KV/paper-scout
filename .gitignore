@@ -32,6 +32,11 @@ go.work.sum
 # Logs
 *.log
 logs/
+dev.log
+prod.log
+
+# Air hot reload
+tmp/
 
 # Database
 *.db

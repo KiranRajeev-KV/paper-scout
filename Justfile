@@ -65,7 +65,15 @@ install-sqlc:
 install-lint:
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
+# Install air for hot reload (if not installed)
+install-air:
+    go install github.com/air-verse/air@latest
+
+# Run with hot reload (requires air)
+dev:
+    air
+
 # Development setup
-setup: install-sqlc
+setup: install-sqlc install-air
     cp .env.example .env
-    @echo "Edit .env with your API keys, then run: just build"
+    @echo "Edit .env with your API keys, then run: just dev"

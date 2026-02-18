@@ -663,16 +663,19 @@ clean:
 - [x] internal/orchestrator/sse.go
 
 ### Phase 9: API
-- [ ] internal/api/router.go
-- [ ] internal/api/handler/*
-- [ ] internal/api/middleware/*
+- [x] internal/api/router.go
+- [x] internal/api/handler/research.go
+- [x] internal/api/handler/health.go
+- [x] internal/api/middleware/logging.go
+- [x] internal/api/middleware/recovery.go
+- [x] internal/api/middleware/cors.go
 
 ### Phase 10: Entry Point
-- [ ] cmd/server/main.go
+- [x] cmd/server/main.go
 
 ### Phase 11: Docker
-- [ ] Dockerfile
-- [ ] docker-compose.yml
+- [x] Dockerfile
+- [x] docker-compose.yml
 - [x] Justfile
 
 ---

@@ -15,17 +15,29 @@ func init() {
 }
 
 func SetDevelopment() {
-	output := zerolog.ConsoleWriter{
+	file, err := os.OpenFile("dev.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		file = os.Stdout
+	}
+
+	console := zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: time.Kitchen,
 		NoColor:    false,
 	}
-	log = zerolog.New(output).With().Timestamp().Logger()
+
+	multi := io.MultiWriter(console, file)
+	log = zerolog.New(multi).With().Timestamp().Logger()
 	log = log.With().Caller().Logger()
 }
 
 func SetProduction() {
-	log = zerolog.New(os.Stdout).With().Timestamp().Logger()
+	file, err := os.OpenFile("prod.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		file = os.Stdout
+	}
+
+	log = zerolog.New(file).With().Timestamp().Logger()
 }
 
 func SetLevel(level string) {
