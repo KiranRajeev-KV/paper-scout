@@ -134,7 +134,7 @@ Even then, document what you assumed.
 | Validation | ozzo-validation | v4 |
 | UUID Generation | google/uuid | latest |
 | Migrations | goose | latest |
-| LLM SDK | google/generative-ai-go | latest |
+| LLM SDK | google.golang.org/genai | latest |
 | Vector DB Client | qdrant/go-client | latest |
 
 ### Logging Setup
@@ -624,10 +624,10 @@ clean:
 - [x] internal/storage/qdrant/client.go
 
 ### Phase 4: LLM Layer
-- [ ] internal/llm/client.go
-- [ ] internal/llm/retry.go
-- [ ] internal/llm/structured.go
-- [ ] internal/llm/prompts/*.go
+- [x] internal/llm/client.go
+- [x] internal/llm/retry.go
+- [x] internal/llm/structured.go
+- [x] internal/llm/prompts/prompts.go
 
 ### Phase 5: Tools
 - [ ] internal/tools/semantic_scholar/*
