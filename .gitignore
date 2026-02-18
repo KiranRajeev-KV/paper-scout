@@ -1,0 +1,57 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binaries
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+
+# Build artifacts
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Generated files (SQLC)
+/internal/storage/postgres/models.go
+/internal/storage/postgres/db.go
+/internal/storage/postgres/querier.go
+
+# Temporary files
+*.tmp
+*.temp

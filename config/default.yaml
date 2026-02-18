@@ -1,0 +1,76 @@
+server:
+  host: "${SERVER_HOST:0.0.0.0}"
+  port: ${SERVER_PORT:8080}
+  read_timeout: 30s
+  write_timeout: 60s
+
+database:
+  postgres:
+    host: "${POSTGRES_HOST:postgres}"
+    port: ${POSTGRES_PORT:5432}
+    database: "${POSTGRES_DB:research_agent}"
+    user: "${POSTGRES_USER:research}"
+    password: "${POSTGRES_PASSWORD:research123}"
+    sslmode: "${POSTGRES_SSLMODE:disable}"
+    max_connections: 20
+    max_idle: 5
+    conn_timeout: 10s
+
+  redis:
+    host: "${REDIS_HOST:redis}"
+    port: ${REDIS_PORT:6379}
+    password: "${REDIS_PASSWORD:}"
+    db: ${REDIS_DB:0}
+    pool_size: 10
+
+  qdrant:
+    host: "${QDRANT_HOST:qdrant}"
+    port: ${QDRANT_PORT:6333}
+    collection: "${QDRANT_COLLECTION:paper_embeddings}"
+    api_key: "${QDRANT_API_KEY:}"
+
+llm:
+  provider: "${LLM_PROVIDER:gemini}"
+  api_key: "${GEMINI_API_KEY}"
+  model: "${GEMINI_MODEL:gemini-1.5-flash}"
+  embedding_model: "${GEMINI_EMBEDDING_MODEL:text-embedding-004}"
+  max_retries: 3
+  base_backoff: 1s
+  max_backoff: 30s
+  timeout: 120s
+
+apis:
+  semantic_scholar:
+    api_key: "${SEMANTIC_SCHOLAR_API_KEY:}"
+    base_url: "https://api.semanticscholar.org/graph/v1"
+    rate_limit:
+      requests_per_second: 5
+      burst: 10
+    timeout: 30s
+
+  arxiv:
+    base_url: "http://export.arxiv.org/api/query"
+    rate_limit:
+      requests_per_second: 1
+      burst: 3
+    timeout: 60s
+
+  unstructured:
+    base_url: "${UNSTRUCTURED_URL:http://unstructured:8000}"
+    timeout: 120s
+
+pipeline:
+  max_papers: ${MAX_PAPERS:50}
+  min_papers_for_analysis: ${MIN_PAPERS:5}
+  worker_pool_size: ${WORKER_POOL_SIZE:10}
+  job_timeout: 10m
+  pdf_download_timeout: 60s
+
+cache:
+  default_ttl: 24h
+  search_ttl: 1h
+  embedding_ttl: 168h
+
+logging:
+  level: "${LOG_LEVEL:info}"
+  format: "${LOG_FORMAT:console}"
