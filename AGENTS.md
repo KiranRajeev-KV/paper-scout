@@ -522,8 +522,8 @@ See `config/default.yaml` for all configurable options.
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | app | custom | 8080 | Main Go application |
-| postgres | postgres:16-alpine | 5432 | Primary database |
-| redis | redis:7-alpine | 6379 | Cache + job queue |
+| postgres | postgres:17-alpine | 5432 | Primary database |
+| redis | redis:8-alpine | 6379 | Cache + job queue |
 | qdrant | qdrant/qdrant:latest | 6333 | Vector database |
 | unstructured | quay.io/unstructured-io/unstructured-api:latest | 8000 | PDF parsing |
 
