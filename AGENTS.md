@@ -647,13 +647,14 @@ clean:
 - [x] internal/worker/processor.go
 
 ### Phase 7: Agents
-- [ ] internal/agent/query_expander.go
-- [ ] internal/agent/paper_discoverer.go
-- [ ] internal/agent/ranker.go
-- [ ] internal/agent/analyzer.go
-- [ ] internal/agent/gap_detector.go
-- [ ] internal/agent/feasibility.go
-- [ ] internal/agent/report_generator.go
+- [x] internal/agent/helpers.go
+- [x] internal/agent/query_expander.go
+- [x] internal/agent/paper_discoverer.go
+- [x] internal/agent/ranker.go
+- [x] internal/agent/analyzer.go
+- [x] internal/agent/gap_detector.go
+- [x] internal/agent/feasibility.go
+- [x] internal/agent/report_generator.go
 
 ### Phase 8: Orchestrator
 - [ ] internal/orchestrator/orchestrator.go
