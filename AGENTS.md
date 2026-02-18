@@ -132,6 +132,8 @@ Even then, document what you assumed.
 | Logging | zerolog | latest |
 | Configuration | koanf | latest |
 | Validation | ozzo-validation | v4 |
+| UUID Generation | google/uuid | latest |
+| Migrations | goose | latest |
 | LLM SDK | google/generative-ai-go | latest |
 | Vector DB Client | qdrant/go-client | latest |
 
