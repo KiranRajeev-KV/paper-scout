@@ -1,0 +1,327 @@
+package orchestrator
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/research-agent/internal/agent"
+	"github.com/research-agent/internal/config"
+	"github.com/research-agent/internal/llm"
+	"github.com/research-agent/internal/logger"
+	"github.com/research-agent/internal/storage/postgres"
+	"github.com/research-agent/internal/storage/qdrant"
+	"github.com/research-agent/internal/storage/redis"
+	"github.com/research-agent/internal/tools/arxiv"
+	"github.com/research-agent/internal/tools/embedding"
+	"github.com/research-agent/internal/tools/pdf"
+	"github.com/research-agent/internal/tools/semantic_scholar"
+	"github.com/research-agent/internal/worker"
+)
+
+type Orchestrator struct {
+	config   *config.Config
+	postgres *postgres.Client
+	redis    *redis.Client
+	qdrant   *qdrant.Client
+
+	queryExpander   *agent.QueryExpander
+	paperDiscoverer *agent.PaperDiscoverer
+	ranker          *agent.Ranker
+	analyzer        *agent.Analyzer
+	gapDetector     *agent.GapDetector
+	feasibility     *agent.FeasibilityEvaluator
+	reportGenerator *agent.ReportGenerator
+
+	workerPool *worker.Pool
+
+	sse   *SSEManager
+	state *StateManager
+
+	mu        sync.RWMutex
+	pipelines map[string]*Pipeline
+}
+
+type Pipeline struct {
+	TopicID   string
+	Topic     string
+	Status    string
+	Stage     Stage
+	Progress  float64
+	StartedAt time.Time
+	UpdatedAt time.Time
+	Error     string
+}
+
+type Stage string
+
+const (
+	StagePending      Stage = "pending"
+	StageQueryExpand  Stage = "query_expansion"
+	StageDiscovery    Stage = "paper_discovery"
+	StageRanking      Stage = "ranking"
+	StageAnalysis     Stage = "paper_analysis"
+	StageGapDetection Stage = "gap_detection"
+	StageFeasibility  Stage = "feasibility_evaluation"
+	StageReport       Stage = "report_generation"
+	StageCompleted    Stage = "completed"
+	StageFailed       Stage = "failed"
+)
+
+func NewOrchestrator(
+	cfg *config.Config,
+	pg *postgres.Client,
+	redisClient *redis.Client,
+	qdrantClient *qdrant.Client,
+	llmClient *llm.Client,
+	ssClient *semantic_scholar.Client,
+	arxivClient *arxiv.Client,
+) *Orchestrator {
+	downloader := pdf.NewDownloader(cfg.Pipeline.PDFDownloadTimeout)
+	parser := pdf.NewUnstructuredClient(cfg.APIs.Unstructured.BaseURL, cfg.APIs.Unstructured.Timeout)
+
+	embedder := embedding.NewGenerator(llmClient, qdrantClient)
+
+	pool := worker.NewPool(cfg.Pipeline.WorkerPoolSize, 100)
+	processor := worker.NewProcessor(pg, downloader, parser, embedder)
+	pool.SetHandler(processor.CreateHandler())
+	pool.Start()
+
+	o := &Orchestrator{
+		config:     cfg,
+		postgres:   pg,
+		redis:      redisClient,
+		qdrant:     qdrantClient,
+		workerPool: pool,
+		sse:        NewSSEManager(),
+		state:      NewStateManager(redisClient),
+		pipelines:  make(map[string]*Pipeline),
+	}
+
+	o.queryExpander = agent.NewQueryExpander(llmClient, pg)
+	o.paperDiscoverer = agent.NewPaperDiscoverer(ssClient, arxivClient, pg, cfg.Pipeline.MaxPapers)
+	o.ranker = agent.NewRanker(pg, embedder)
+	o.analyzer = agent.NewAnalyzer(llmClient, pg, downloader, parser, pool)
+	o.gapDetector = agent.NewGapDetector(llmClient, pg)
+	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
+	o.reportGenerator = agent.NewReportGenerator(pg)
+
+	return o
+}
+
+func (o *Orchestrator) StartResearch(ctx context.Context, topic string) (*Pipeline, error) {
+	topicRecord, err := o.postgres.Queries().CreateResearchTopic(ctx, postgres.CreateResearchTopicParams{
+		Topic:  topic,
+		Status: "pending",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create research topic: %w", err)
+	}
+
+	pipeline := &Pipeline{
+		TopicID:   topicRecord.ID.String(),
+		Topic:     topic,
+		Status:    "pending",
+		Stage:     StagePending,
+		Progress:  0,
+		StartedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	o.mu.Lock()
+	o.pipelines[pipeline.TopicID] = pipeline
+	o.mu.Unlock()
+
+	o.state.Save(ctx, pipeline.TopicID, pipeline)
+
+	go o.runPipeline(pipeline)
+
+	return pipeline, nil
+}
+
+func (o *Orchestrator) runPipeline(p *Pipeline) {
+	ctx := context.Background()
+
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error().Interface("panic", r).Str("topic_id", p.TopicID).Msg("Pipeline panicked")
+			o.updateStatus(p, StageFailed, 0, fmt.Sprintf("Pipeline panic: %v", r))
+		}
+	}()
+
+	o.updateStatus(p, StageQueryExpand, 0.05, "")
+
+	expanded, err := o.queryExpander.Expand(ctx, p.TopicID, p.Topic)
+	if err != nil {
+		o.updateStatus(p, StageFailed, 0, err.Error())
+		return
+	}
+
+	o.updateStatus(p, StageDiscovery, 0.15, "")
+	papers, err := o.paperDiscoverer.Discover(ctx, p.TopicID, expanded.Queries, expanded.Keywords)
+	if err != nil {
+		o.updateStatus(p, StageFailed, 0, err.Error())
+		return
+	}
+
+	if len(papers) < o.config.Pipeline.MinPapersForAnalysis {
+		o.updateStatus(p, StageFailed, 0, fmt.Sprintf("Not enough papers found: %d (minimum: %d)", len(papers), o.config.Pipeline.MinPapersForAnalysis))
+		return
+	}
+
+	o.updateStatus(p, StageRanking, 0.25, "")
+	ranked, err := o.ranker.Rank(ctx, p.TopicID, p.Topic, o.config.Pipeline.MaxPapers)
+	if err != nil {
+		o.updateStatus(p, StageFailed, 0, err.Error())
+		return
+	}
+
+	o.updateStatus(p, StageAnalysis, 0.35, "")
+
+	if err := o.analyzePapersSync(ctx, p.TopicID, ranked); err != nil {
+		logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
+	}
+
+	o.updateStatus(p, StageGapDetection, 0.65, "")
+	gaps, err := o.gapDetector.Detect(ctx, p.TopicID, p.Topic)
+	if err != nil {
+		o.updateStatus(p, StageFailed, 0, err.Error())
+		return
+	}
+
+	o.updateStatus(p, StageFeasibility, 0.80, "")
+	_, err = o.feasibility.Evaluate(ctx, p.TopicID, gaps)
+	if err != nil {
+		logger.Warn().Err(err).Msg("Feasibility evaluation had errors, continuing...")
+	}
+
+	o.updateStatus(p, StageReport, 0.90, "")
+	report, err := o.reportGenerator.Generate(ctx, p.TopicID)
+	if err != nil {
+		o.updateStatus(p, StageFailed, 0, err.Error())
+		return
+	}
+
+	_ = report
+
+	o.updateStatus(p, StageCompleted, 1.0, "")
+
+	_, err = o.postgres.Queries().UpdateResearchTopicStatus(ctx, postgres.UpdateResearchTopicStatusParams{
+		ID:     parseUUID(p.TopicID),
+		Status: "completed",
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("Failed to update topic status")
+	}
+
+	logger.Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
+}
+
+func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
+	for i, paper := range papers {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		progress := 0.35 + (float64(i)/float64(len(papers)))*0.30
+		o.sse.Broadcast(progressEvent{TopicID: topicID, Stage: "paper_analysis", Progress: progress})
+
+		analysis, err := o.analyzer.AnalyzeSync(ctx, paper.ID, paper.Abstract, "")
+		if err != nil {
+			logger.Warn().Err(err).Str("paper_id", paper.ID).Msg("Failed to analyze paper")
+			continue
+		}
+
+		if err := o.analyzer.StoreAnalysis(ctx, paper.ID, analysis); err != nil {
+			logger.Warn().Err(err).Str("paper_id", paper.ID).Msg("Failed to store analysis")
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, errMsg string) {
+	p.Stage = stage
+	p.Progress = progress
+	p.UpdatedAt = time.Now()
+
+	if errMsg != "" {
+		p.Error = errMsg
+		p.Status = "failed"
+	} else if stage == StageCompleted {
+		p.Status = "completed"
+	} else {
+		p.Status = "processing"
+	}
+
+	o.state.Save(context.Background(), p.TopicID, p)
+
+	o.sse.Broadcast(statusEvent{
+		TopicID:  p.TopicID,
+		Status:   p.Status,
+		Stage:    string(stage),
+		Progress: progress,
+		Error:    errMsg,
+	})
+
+	logger.Debug().
+		Str("topic_id", p.TopicID).
+		Str("stage", string(stage)).
+		Float64("progress", progress).
+		Msg("Pipeline status updated")
+}
+
+func (o *Orchestrator) GetPipeline(topicID string) (*Pipeline, error) {
+	o.mu.RLock()
+	p, exists := o.pipelines[topicID]
+	o.mu.RUnlock()
+
+	if exists {
+		return p, nil
+	}
+
+	return o.state.Load(context.Background(), topicID)
+}
+
+func (o *Orchestrator) GetReport(ctx context.Context, topicID string) (*agent.Report, error) {
+	return o.reportGenerator.Generate(ctx, topicID)
+}
+
+func (o *Orchestrator) GetSSEManager() *SSEManager {
+	return o.sse
+}
+
+func (o *Orchestrator) Shutdown() {
+	o.workerPool.Stop()
+	logger.Info().Msg("Orchestrator shutdown complete")
+}
+
+type statusEvent struct {
+	TopicID  string  `json:"topic_id"`
+	Status   string  `json:"status"`
+	Stage    string  `json:"stage"`
+	Progress float64 `json:"progress"`
+	Error    string  `json:"error,omitempty"`
+}
+
+type progressEvent struct {
+	TopicID  string  `json:"topic_id"`
+	Stage    string  `json:"stage"`
+	Progress float64 `json:"progress"`
+}
+
+func parseUUID(s string) uuid.UUID {
+	id, _ := uuid.Parse(s)
+	return id
+}
+
+func pgDate(t time.Time) pgtype.Date {
+	return pgtype.Date{
+		Time:  t,
+		Valid: true,
+	}
+}

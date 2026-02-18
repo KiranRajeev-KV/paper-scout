@@ -657,10 +657,10 @@ clean:
 - [x] internal/agent/report_generator.go
 
 ### Phase 8: Orchestrator
-- [ ] internal/orchestrator/orchestrator.go
-- [ ] internal/orchestrator/router.go
-- [ ] internal/orchestrator/state.go
-- [ ] internal/orchestrator/sse.go
+- [x] internal/orchestrator/orchestrator.go
+- [x] internal/orchestrator/router.go
+- [x] internal/orchestrator/state.go
+- [x] internal/orchestrator/sse.go
 
 ### Phase 9: API
 - [ ] internal/api/router.go
