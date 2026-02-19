@@ -1,54 +1,17 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
-    environment:
-      - SERVER_HOST=localhost
-      - SERVER_PORT=8080
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=gemini-2.5-flash
-      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=${POSTGRES_USER:-research}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-research123}
-      - POSTGRES_DB=${POSTGRES_DB:-research_agent}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6334
-      - UNSTRUCTURED_URL=http://unstructured:8000
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=${LOG_FORMAT:-json}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      unstructured:
-        condition: service_started
-    networks:
-      - research-net
-    restart: unless-stopped
-
   postgres:
     image: postgres:17-alpine
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-research}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-research123}
-      POSTGRES_DB: ${POSTGRES_DB:-research_agent}
+      POSTGRES_USER: research
+      POSTGRES_PASSWORD: research123
+      POSTGRES_DB: research_agent
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-research} -d ${POSTGRES_DB:-research_agent}"]
+      test: ["CMD-SHELL", "pg_isready -U research -d research_agent"]
       interval: 5s
       timeout: 5s
       retries: 5
