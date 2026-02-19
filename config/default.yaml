@@ -33,7 +33,7 @@ llm:
   provider: gemini
   api_key: ""
   model: gemini-2.5-flash
-  embedding_model: gemini-embbeding-001
+  embedding_model: gemini-embedding-001
   max_retries: 3
   base_backoff: 500ms
   max_backoff: 2s
