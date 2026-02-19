@@ -6,7 +6,7 @@ server:
 
 database:
   postgres:
-    host: postgres
+    host: localhost
     port: 5432
     database: research_agent
     user: research
@@ -17,15 +17,15 @@ database:
     conn_timeout: 30s
 
   redis:
-    host: redis
+    host: localhost
     port: 6379
     password: ""
     db: 0
     pool_size: 10
 
   qdrant:
-    host: qdrant
-    port: 6333
+    host: localhost
+    port: 6334
     collection: default
     api_key: ""
 
