@@ -181,14 +181,13 @@ For each paper, provide a relevance score from 0.0 to 1.0 based on:
 - Quality of methodology (if discernible from abstract)
 - Significance of contribution
 
-Respond in JSON format:
-{
-  "scores": [
-    {"index": 1, "score": 0.95, "reason": "brief reason"},
-    {"index": 2, "score": 0.75, "reason": "brief reason"},
-    ...
-  ]
-}`, topic, paperList.String())
+IMPORTANT: Respond with ONLY valid JSON. No markdown, no explanations outside JSON.
+The response must be a JSON object with a "scores" array.
+
+Example:
+{"scores":[{"index":1,"score":0.95,"reason":"highly relevant"},{"index":2,"score":0.75,"reason":"somewhat relevant"}]}
+
+Respond with JSON only:`, topic, paperList.String())
 
 	schema := map[string]interface{}{
 		"scores": []map[string]interface{}{
@@ -205,20 +204,13 @@ Respond in JSON format:
 		return nil, fmt.Errorf("failed to generate rerank scores: %w", err)
 	}
 
-	var response struct {
-		Scores []struct {
-			Index  int     `json:"index"`
-			Score  float64 `json:"score"`
-			Reason string  `json:"reason"`
-		} `json:"scores"`
-	}
-
-	if err := json.Unmarshal([]byte(result), &response); err != nil {
+	scores, err := parseRerankResponse(result)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse rerank response: %w", err)
 	}
 
 	scoreMap := make(map[int]float64)
-	for _, s := range response.Scores {
+	for _, s := range scores {
 		if s.Index >= 1 && s.Index <= len(papers) {
 			scoreMap[s.Index-1] = s.Score
 		}
@@ -236,6 +228,34 @@ Respond in JSON format:
 	}
 
 	return resultPapers, nil
+}
+
+type scoreEntry struct {
+	Index  int     `json:"index"`
+	Score  float64 `json:"score"`
+	Reason string  `json:"reason"`
+}
+
+func parseRerankResponse(result string) ([]scoreEntry, error) {
+	cleaned := strings.TrimSpace(result)
+	cleaned = strings.TrimPrefix(cleaned, "```json")
+	cleaned = strings.TrimPrefix(cleaned, "```")
+	cleaned = strings.TrimSuffix(cleaned, "```")
+	cleaned = strings.TrimSpace(cleaned)
+
+	var response struct {
+		Scores []scoreEntry `json:"scores"`
+	}
+
+	if err := json.Unmarshal([]byte(cleaned), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse: %w", err)
+	}
+
+	if len(response.Scores) == 0 {
+		return nil, fmt.Errorf("no scores in response")
+	}
+
+	return response.Scores, nil
 }
 
 func cosineSimilarity(a, b []float32) float64 {

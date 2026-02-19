@@ -40,7 +40,7 @@ type ExternalIDs struct {
 	PMCID  string `json:"PubMedCentral"`
 	MAG    int    `json:"MAG"`
 	ACL    string `json:"ACL"`
-	Corpus string `json:"CorpusId"`
+	Corpus int64  `json:"CorpusId"`
 }
 
 type PaperReference struct {
