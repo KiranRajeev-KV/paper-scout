@@ -87,6 +87,9 @@ RETURNING *;
 -- name: CountPapersByTopic :one
 SELECT COUNT(*) FROM papers WHERE topic_id = $1;
 
+-- name: DeletePapersByTopic :exec
+DELETE FROM papers WHERE topic_id = $1;
+
 -- name: AddPaperAuthor :exec
 INSERT INTO paper_authors (paper_id, author_id, position)
 VALUES ($1, $2, $3)

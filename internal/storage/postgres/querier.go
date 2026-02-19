@@ -21,6 +21,7 @@ type Querier interface {
 	CreatePipelineRun(ctx context.Context, arg CreatePipelineRunParams) (*PipelineRun, error)
 	CreateResearchGap(ctx context.Context, arg CreateResearchGapParams) (*ResearchGap, error)
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
+	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
 	GetAuthorBySemanticScholarID(ctx context.Context, semanticScholarID pgtype.Text) (*Author, error)
 	GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error)

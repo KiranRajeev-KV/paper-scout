@@ -182,3 +182,11 @@ func (d *PaperDiscoverer) storePaper(ctx context.Context, topicID string, paper 
 
 	return err
 }
+
+func (d *PaperDiscoverer) ClearPapers(ctx context.Context, topicID string) error {
+	return d.postgres.Queries().DeletePapersByTopic(ctx, pgUUID(topicID))
+}
+
+func (d *PaperDiscoverer) CountPapers(ctx context.Context, topicID string) (int64, error) {
+	return d.postgres.Queries().CountPapersByTopic(ctx, pgUUID(topicID))
+}

@@ -90,3 +90,50 @@ Respond in JSON format:
 
 	return &expanded, nil
 }
+
+type QueryLevel int
+
+const (
+	QueryLevelFull QueryLevel = iota
+	QueryLevelBroad
+	QueryLevelMinimal
+)
+
+func (e *ExpandedQuery) GetQueriesForLevel(level QueryLevel, originalTopic string) []string {
+	switch level {
+	case QueryLevelFull:
+		return e.Queries
+	case QueryLevelBroad:
+		if len(e.Queries) <= 1 {
+			return []string{originalTopic}
+		}
+		return e.Queries[:max(2, len(e.Queries)/2)]
+	case QueryLevelMinimal:
+		return []string{originalTopic}
+	default:
+		return e.Queries
+	}
+}
+
+func (e *ExpandedQuery) GetKeywordsForLevel(level QueryLevel) []string {
+	switch level {
+	case QueryLevelFull:
+		return e.Keywords
+	case QueryLevelBroad:
+		if len(e.Keywords) <= 2 {
+			return nil
+		}
+		return e.Keywords[:max(1, len(e.Keywords)/2)]
+	case QueryLevelMinimal:
+		return nil
+	default:
+		return e.Keywords
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

@@ -161,7 +161,7 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 	}
 
 	o.updateStatus(p, StageDiscovery, 0.15, "")
-	papers, err := o.paperDiscoverer.Discover(ctx, p.TopicID, expanded.Queries, expanded.Keywords)
+	papers, err := o.discoverWithRetry(ctx, p.TopicID, p.Topic, expanded)
 	if err != nil {
 		o.updateStatus(p, StageFailed, 0, err.Error())
 		return
@@ -242,6 +242,74 @@ func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, pa
 		}
 	}
 	return nil
+}
+
+func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic string, expanded *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error) {
+	const maxAttempts = 3
+	levels := []agent.QueryLevel{
+		agent.QueryLevelFull,
+		agent.QueryLevelBroad,
+		agent.QueryLevelMinimal,
+	}
+
+	var lastErr error
+	var allPapers []agent.DiscoveredPaper
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		level := levels[attempt]
+		queries := expanded.GetQueriesForLevel(level, topic)
+		keywords := expanded.GetKeywordsForLevel(level)
+
+		logger.Info().
+			Str("topic_id", topicID).
+			Int("attempt", attempt+1).
+			Int("level", int(level)).
+			Int("queries", len(queries)).
+			Int("keywords", len(keywords)).
+			Msg("Attempting paper discovery")
+
+		if attempt > 0 {
+			if err := o.paperDiscoverer.ClearPapers(ctx, topicID); err != nil {
+				logger.Warn().Err(err).Msg("Failed to clear papers before retry")
+			}
+		}
+
+		papers, err := o.paperDiscoverer.Discover(ctx, topicID, queries, keywords)
+		if err != nil {
+			lastErr = err
+			logger.Warn().
+				Err(err).
+				Int("attempt", attempt+1).
+				Msg("Discovery attempt failed")
+			continue
+		}
+
+		allPapers = papers
+
+		if len(papers) >= o.config.Pipeline.MinPapersForAnalysis {
+			logger.Info().
+				Int("attempt", attempt+1).
+				Int("papers_found", len(papers)).
+				Msg("Discovery succeeded")
+			return papers, nil
+		}
+
+		logger.Warn().
+			Int("attempt", attempt+1).
+			Int("papers_found", len(papers)).
+			Int("min_required", o.config.Pipeline.MinPapersForAnalysis).
+			Msg("Not enough papers, retrying with broader queries")
+	}
+
+	if len(allPapers) > 0 {
+		return allPapers, nil
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("all discovery attempts failed: %w", lastErr)
+	}
+
+	return nil, fmt.Errorf("not enough papers found after %d attempts", maxAttempts)
 }
 
 func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, errMsg string) {

@@ -301,6 +301,15 @@ func (q *Queries) CreateResearchTopic(ctx context.Context, arg CreateResearchTop
 	return &i, err
 }
 
+const deletePapersByTopic = `-- name: DeletePapersByTopic :exec
+DELETE FROM papers WHERE topic_id = $1
+`
+
+func (q *Queries) DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deletePapersByTopic, topicID)
+	return err
+}
+
 const deleteResearchTopic = `-- name: DeleteResearchTopic :exec
 DELETE FROM research_topics WHERE id = $1
 `
