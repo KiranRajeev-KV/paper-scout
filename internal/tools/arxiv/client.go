@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/research-agent/internal/circuitbreaker"
 	"github.com/research-agent/internal/config"
 	"github.com/research-agent/internal/logger"
 )
@@ -20,70 +21,92 @@ const (
 )
 
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	rateLimit  *RateLimiter
+	httpClient     *http.Client
+	baseURL        string
+	rateLimit      *RateLimiter
+	circuitBreaker *circuitbreaker.CircuitBreaker
 }
 
 func NewClient(cfg config.ArXivConfig) *Client {
+	cb := circuitbreaker.New("arxiv", circuitbreaker.Config{
+		FailureThreshold: 5,
+		SuccessThreshold: 2,
+		OpenTimeout:      30 * time.Second,
+		OnStateChange: func(name string, from, to circuitbreaker.State) {
+			logger.Warn().
+				Str("name", name).
+				Str("from", from.String()).
+				Str("to", to.String()).
+				Msg("Circuit breaker state changed")
+		},
+	})
+
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
-		baseURL:   cfg.BaseURL,
-		rateLimit: NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst),
+		baseURL:        cfg.BaseURL,
+		rateLimit:      NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst),
+		circuitBreaker: cb,
 	}
 }
 
 func (c *Client) Search(ctx context.Context, query string, maxResults int) (*Feed, error) {
-	if err := c.rateLimit.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait failed: %w", err)
-	}
+	var feed *Feed
 
-	params := url.Values{}
-	params.Set("search_query", query)
-	params.Set("start", "0")
-	params.Set("max_results", strconv.Itoa(maxResults))
-	params.Set("sortBy", "relevance")
-	params.Set("sortOrder", "descending")
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		if err := c.rateLimit.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait failed: %w", err)
+		}
 
-	fullURL := c.baseURL + "?" + params.Encode()
+		params := url.Values{}
+		params.Set("search_query", query)
+		params.Set("start", "0")
+		params.Set("max_results", strconv.Itoa(maxResults))
+		params.Set("sortBy", "relevance")
+		params.Set("sortOrder", "descending")
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+		fullURL := c.baseURL + "?" + params.Encode()
 
-	req.Header.Set("Accept", "application/xml")
+		req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
 
-	start := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		req.Header.Set("Accept", "application/xml")
 
-	logger.Debug().
-		Str("query", query).
-		Int("status", resp.StatusCode).
-		Dur("duration", time.Since(start)).
-		Msg("arXiv API call")
+		start := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+		logger.Debug().
+			Str("query", query).
+			Int("status", resp.StatusCode).
+			Dur("duration", time.Since(start)).
+			Msg("arXiv API call")
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
 
-	var feed Feed
-	if err := xml.Unmarshal(body, &feed); err != nil {
-		return nil, fmt.Errorf("failed to parse XML: %w", err)
-	}
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		}
 
-	return &feed, nil
+		var f Feed
+		if err := xml.Unmarshal(body, &f); err != nil {
+			return fmt.Errorf("failed to parse XML: %w", err)
+		}
+
+		feed = &f
+		return nil
+	})
+
+	return feed, err
 }
 
 func (c *Client) GetByID(ctx context.Context, arxivID string) (*Entry, error) {

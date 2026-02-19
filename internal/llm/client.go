@@ -3,18 +3,21 @@ package llm
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/research-agent/internal/circuitbreaker"
 	"github.com/research-agent/internal/config"
 	"github.com/research-agent/internal/logger"
 	"google.golang.org/genai"
 )
 
 type Client struct {
-	client   *genai.Client
-	config   config.LLMConfig
-	retry    *RetryPolicy
-	model    string
-	embModel string
+	client         *genai.Client
+	config         config.LLMConfig
+	retry          *RetryPolicy
+	model          string
+	embModel       string
+	circuitBreaker *circuitbreaker.CircuitBreaker
 }
 
 func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
@@ -28,17 +31,31 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 
 	retry := NewRetryPolicy(cfg.MaxRetries, cfg.BaseBackoff, cfg.MaxBackoff)
 
+	cb := circuitbreaker.New("gemini", circuitbreaker.Config{
+		FailureThreshold: 5,
+		SuccessThreshold: 2,
+		OpenTimeout:      60 * time.Second,
+		OnStateChange: func(name string, from, to circuitbreaker.State) {
+			logger.Warn().
+				Str("name", name).
+				Str("from", from.String()).
+				Str("to", to.String()).
+				Msg("Circuit breaker state changed")
+		},
+	})
+
 	logger.Info().
 		Str("model", cfg.Model).
 		Str("embedding_model", cfg.EmbeddingModel).
 		Msg("Connected to Gemini LLM")
 
 	return &Client{
-		client:   client,
-		config:   cfg,
-		retry:    retry,
-		model:    cfg.Model,
-		embModel: cfg.EmbeddingModel,
+		client:         client,
+		config:         cfg,
+		retry:          retry,
+		model:          cfg.Model,
+		embModel:       cfg.EmbeddingModel,
+		circuitBreaker: cb,
 	}, nil
 }
 
@@ -50,24 +67,26 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	var result string
 	var usage *TokenUsage
 
-	err := c.retry.Execute(ctx, func() error {
-		parts := []*genai.Part{{Text: prompt}}
-		contents := []*genai.Content{{Parts: parts}}
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		return c.retry.Execute(ctx, func() error {
+			parts := []*genai.Part{{Text: prompt}}
+			contents := []*genai.Content{{Parts: parts}}
 
-		resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, nil)
-		if err != nil {
-			return err
-		}
-
-		result = resp.Text()
-		if resp.UsageMetadata != nil {
-			usage = &TokenUsage{
-				InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-				OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
-				TotalTokens:  int(resp.UsageMetadata.TotalTokenCount),
+			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, nil)
+			if err != nil {
+				return err
 			}
-		}
-		return nil
+
+			result = resp.Text()
+			if resp.UsageMetadata != nil {
+				usage = &TokenUsage{
+					InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
+					OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+					TotalTokens:  int(resp.UsageMetadata.TotalTokenCount),
+				}
+			}
+			return nil
+		})
 	})
 
 	if err != nil {
@@ -88,24 +107,26 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 	var result string
 	var usage *TokenUsage
 
-	err := c.retry.Execute(ctx, func() error {
-		parts := []*genai.Part{{Text: prompt}}
-		contents := []*genai.Content{{Parts: parts}}
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		return c.retry.Execute(ctx, func() error {
+			parts := []*genai.Part{{Text: prompt}}
+			contents := []*genai.Content{{Parts: parts}}
 
-		resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, cfg)
-		if err != nil {
-			return err
-		}
-
-		result = resp.Text()
-		if resp.UsageMetadata != nil {
-			usage = &TokenUsage{
-				InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-				OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
-				TotalTokens:  int(resp.UsageMetadata.TotalTokenCount),
+			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, cfg)
+			if err != nil {
+				return err
 			}
-		}
-		return nil
+
+			result = resp.Text()
+			if resp.UsageMetadata != nil {
+				usage = &TokenUsage{
+					InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
+					OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+					TotalTokens:  int(resp.UsageMetadata.TotalTokenCount),
+				}
+			}
+			return nil
+		})
 	})
 
 	if err != nil {
@@ -125,24 +146,26 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	var embeddings [][]float32
 
-	err := c.retry.Execute(ctx, func() error {
-		contents := make([]*genai.Content, len(texts))
-		for i, text := range texts {
-			contents[i] = &genai.Content{
-				Parts: []*genai.Part{{Text: text}},
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		return c.retry.Execute(ctx, func() error {
+			contents := make([]*genai.Content, len(texts))
+			for i, text := range texts {
+				contents[i] = &genai.Content{
+					Parts: []*genai.Part{{Text: text}},
+				}
 			}
-		}
 
-		result, err := c.client.Models.EmbedContent(ctx, c.embModel, contents, nil)
-		if err != nil {
-			return err
-		}
+			result, err := c.client.Models.EmbedContent(ctx, c.embModel, contents, nil)
+			if err != nil {
+				return err
+			}
 
-		embeddings = make([][]float32, len(result.Embeddings))
-		for i, emb := range result.Embeddings {
-			embeddings[i] = emb.Values
-		}
-		return nil
+			embeddings = make([][]float32, len(result.Embeddings))
+			for i, emb := range result.Embeddings {
+				embeddings[i] = emb.Values
+			}
+			return nil
+		})
 	})
 
 	if err != nil {

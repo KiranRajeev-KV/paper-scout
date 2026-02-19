@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/research-agent/internal/circuitbreaker"
 	"github.com/research-agent/internal/config"
 	"github.com/research-agent/internal/logger"
 )
@@ -20,66 +21,88 @@ const (
 )
 
 type Client struct {
-	httpClient *http.Client
-	apiKey     string
-	baseURL    string
-	rateLimit  *RateLimiter
+	httpClient     *http.Client
+	apiKey         string
+	baseURL        string
+	rateLimit      *RateLimiter
+	circuitBreaker *circuitbreaker.CircuitBreaker
 }
 
 func NewClient(cfg config.SemanticScholarConfig) *Client {
+	cb := circuitbreaker.New("semantic-scholar", circuitbreaker.Config{
+		FailureThreshold: 5,
+		SuccessThreshold: 2,
+		OpenTimeout:      30 * time.Second,
+		OnStateChange: func(name string, from, to circuitbreaker.State) {
+			logger.Warn().
+				Str("name", name).
+				Str("from", from.String()).
+				Str("to", to.String()).
+				Msg("Circuit breaker state changed")
+		},
+	})
+
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
-		apiKey:    cfg.APIKey,
-		baseURL:   cfg.BaseURL,
-		rateLimit: NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst),
+		apiKey:         cfg.APIKey,
+		baseURL:        cfg.BaseURL,
+		rateLimit:      NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst),
+		circuitBreaker: cb,
 	}
 }
 
 func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Values) ([]byte, error) {
-	if err := c.rateLimit.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait failed: %w", err)
-	}
+	var result []byte
 
-	fullURL := c.baseURL + endpoint
-	if params != nil {
-		fullURL = fullURL + "?" + params.Encode()
-	}
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		if err := c.rateLimit.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait failed: %w", err)
+		}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
+		fullURL := c.baseURL + endpoint
+		if params != nil {
+			fullURL = fullURL + "?" + params.Encode()
+		}
 
-	if c.apiKey != "" {
-		req.Header.Set("x-api-key", c.apiKey)
-	}
-	req.Header.Set("Accept", "application/json")
+		req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
 
-	start := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		if c.apiKey != "" {
+			req.Header.Set("x-api-key", c.apiKey)
+		}
+		req.Header.Set("Accept", "application/json")
 
-	logger.Debug().
-		Str("endpoint", endpoint).
-		Int("status", resp.StatusCode).
-		Dur("duration", time.Since(start)).
-		Msg("Semantic Scholar API call")
+		start := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+		logger.Debug().
+			Str("endpoint", endpoint).
+			Int("status", resp.StatusCode).
+			Dur("duration", time.Since(start)).
+			Msg("Semantic Scholar API call")
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
 
-	return body, nil
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		}
+
+		result = body
+		return nil
+	})
+
+	return result, err
 }
 
 func (c *Client) Search(ctx context.Context, query string, limit, offset int) (*SearchResponse, error) {
@@ -124,53 +147,58 @@ func (c *Client) GetPapersBatch(ctx context.Context, paperIDs []string) ([]Paper
 		return nil, nil
 	}
 
-	params := url.Values{}
-	params.Set("fields", "paperId,title,abstract,year,authors,venue,url,openAccessPdf,citationCount,publicationDate,externalIds")
-
-	reqBody := struct {
-		IDs []string `json:"ids"`
-	}{IDs: paperIDs}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	fullURL := c.baseURL + "/paper/batch?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if c.apiKey != "" {
-		req.Header.Set("x-api-key", c.apiKey)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	if err := c.rateLimit.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait failed: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
 	var papers []Paper
-	if err := json.Unmarshal(body, &papers); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
 
-	return papers, nil
+	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		params := url.Values{}
+		params.Set("fields", "paperId,title,abstract,year,authors,venue,url,openAccessPdf,citationCount,publicationDate,externalIds")
+
+		reqBody := struct {
+			IDs []string `json:"ids"`
+		}{IDs: paperIDs}
+
+		jsonBody, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		fullURL := c.baseURL + "/paper/batch?" + params.Encode()
+		req, err := http.NewRequestWithContext(ctx, "POST", fullURL, strings.NewReader(string(jsonBody)))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		if c.apiKey != "" {
+			req.Header.Set("x-api-key", c.apiKey)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		if err := c.rateLimit.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait failed: %w", err)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		}
+
+		if err := json.Unmarshal(body, &papers); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		return nil
+	})
+
+	return papers, err
 }
