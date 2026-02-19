@@ -38,7 +38,7 @@ llm:
   base_backoff: 500ms
   max_backoff: 2s
   timeout: 30s
-  max_output_tokens: 1024
+  max_output_tokens: 512
   requests_per_minute: 15
   requests_per_day: 1000
 

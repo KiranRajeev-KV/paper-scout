@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/research-agent/internal/llm"
 	"github.com/research-agent/internal/logger"
@@ -84,32 +85,21 @@ func (a *Analyzer) AnalyzeSync(ctx context.Context, paperID, abstract, pdfURL st
 		fullText = abstract
 	}
 
-	prompt := fmt.Sprintf(`Analyze this academic paper and extract BRIEF structured information.
+	prompt := fmt.Sprintf(`Analyze this paper. Answer with a numbered list ONLY. No JSON. No explanation.
 
 Text: %s
 
-Respond with ONLY valid JSON. Keep each field under 100 characters.
-{
-  "problem_statement": "One sentence problem summary",
-  "methodology": "One sentence method summary",
-  "dataset": "Dataset name or 'Not specified'",
-  "evaluation_metrics": ["metric1", "metric2"],
-  "key_findings": "One sentence main finding",
-  "limitations": "One sentence limitation",
-  "future_work": "One sentence future work"
-}`, truncateText(fullText, 10000))
+1. Problem (max 80 chars):
+2. Method (max 80 chars):
+3. Dataset (or "Not specified"):
+4. Metrics (comma-separated):
+5. Finding (max 80 chars):
+6. Limitation (max 80 chars):
+7. Future work (max 80 chars):
 
-	schema := map[string]interface{}{
-		"problem_statement":  "",
-		"methodology":        "",
-		"dataset":            "",
-		"evaluation_metrics": []string{},
-		"key_findings":       "",
-		"limitations":        "",
-		"future_work":        "",
-	}
+Answer with 7 lines only.`, truncateText(fullText, 5000))
 
-	result, err := a.structured.Generate(ctx, prompt, schema)
+	result, err := a.llm.Generate(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze paper: %w", err)
 	}
@@ -120,18 +110,56 @@ Respond with ONLY valid JSON. Keep each field under 100 characters.
 		Str("result", truncateText(result, 500)).
 		Msg("LLM analysis result")
 
-	var analysis PaperAnalysis
-	if err := json.Unmarshal([]byte(result), &analysis); err != nil {
+	analysis := parseNumberedListToAnalysis(result)
+	if analysis == nil {
 		logger.Error().
-			Err(err).
 			Str("paper_id", paperID).
 			Int("result_len", len(result)).
 			Str("result", truncateText(result, 1000)).
 			Msg("Failed to parse LLM analysis response")
-		return nil, fmt.Errorf("failed to parse analysis: %w", err)
+		return nil, fmt.Errorf("failed to parse analysis: invalid format")
 	}
 
-	return &analysis, nil
+	return analysis, nil
+}
+
+func parseNumberedListToAnalysis(result string) *PaperAnalysis {
+	lines := strings.Split(result, "\n")
+	if len(lines) < 7 {
+		return nil
+	}
+
+	extractField := func(line string, maxLen int) string {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) < 2 {
+			return ""
+		}
+		value := strings.TrimSpace(parts[1])
+		if len(value) > maxLen {
+			value = value[:maxLen]
+		}
+		return value
+	}
+
+	analysis := &PaperAnalysis{
+		ProblemStatement: extractField(lines[0], 80),
+		Methodology:      extractField(lines[1], 80),
+		Dataset:          extractField(lines[2], 50),
+		KeyFindings:      extractField(lines[4], 80),
+		Limitations:      extractField(lines[5], 80),
+		FutureWork:       extractField(lines[6], 80),
+	}
+
+	metricsLine := extractField(lines[3], 200)
+	if metricsLine != "" && metricsLine != "Not specified" {
+		metrics := strings.Split(metricsLine, ",")
+		for i, m := range metrics {
+			metrics[i] = strings.TrimSpace(m)
+		}
+		analysis.EvaluationMetrics = metrics
+	}
+
+	return analysis
 }
 
 func (a *Analyzer) StoreAnalysis(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
