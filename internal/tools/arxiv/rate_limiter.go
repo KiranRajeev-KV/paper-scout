@@ -1,4 +1,4 @@
-package semantic_scholar
+package arxiv
 
 import (
 	"context"

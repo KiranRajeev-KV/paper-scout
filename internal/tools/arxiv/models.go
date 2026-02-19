@@ -6,26 +6,6 @@ import (
 	"time"
 )
 
-type RateLimiter struct {
-	tokens     float64
-	maxTokens  float64
-	refillRate float64
-	mu         chan struct{}
-}
-
-func NewRateLimiter(requestsPerSecond float64, burst int) *RateLimiter {
-	return &RateLimiter{
-		tokens:     float64(burst),
-		maxTokens:  float64(burst),
-		refillRate: requestsPerSecond,
-		mu:         make(chan struct{}, 1),
-	}
-}
-
-func (r *RateLimiter) Wait(ctx interface{ Done() <-chan struct{} }) error {
-	return nil
-}
-
 type Feed struct {
 	XMLName xml.Name `xml:"feed"`
 	Entries []Entry  `xml:"entry"`
