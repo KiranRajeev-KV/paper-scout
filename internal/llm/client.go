@@ -18,6 +18,7 @@ type Client struct {
 	model          string
 	embModel       string
 	circuitBreaker *circuitbreaker.CircuitBreaker
+	rateLimiter    *LLMRateLimiter
 }
 
 func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
@@ -44,9 +45,19 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 		},
 	})
 
+	var rateLimiter *LLMRateLimiter
+	if cfg.RequestsPerMinute > 0 && cfg.RequestsPerDay > 0 {
+		rateLimiter = NewLLMRateLimiter(cfg.RequestsPerMinute, cfg.RequestsPerDay)
+		logger.Info().
+			Int("rpm", cfg.RequestsPerMinute).
+			Int("rpd", cfg.RequestsPerDay).
+			Msg("LLM rate limiter initialized")
+	}
+
 	logger.Info().
 		Str("model", cfg.Model).
 		Str("embedding_model", cfg.EmbeddingModel).
+		Int("max_output_tokens", cfg.MaxOutputTokens).
 		Msg("Connected to Gemini LLM")
 
 	return &Client{
@@ -56,6 +67,7 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 		model:          cfg.Model,
 		embModel:       cfg.EmbeddingModel,
 		circuitBreaker: cb,
+		rateLimiter:    rateLimiter,
 	}, nil
 }
 
@@ -63,16 +75,33 @@ func (c *Client) Close() error {
 	return nil
 }
 
+func (c *Client) Config() config.LLMConfig {
+	return c.config
+}
+
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	var result string
 	var usage *TokenUsage
 
 	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				return err
+			}
+		}
+
 		return c.retry.Execute(ctx, func() error {
 			parts := []*genai.Part{{Text: prompt}}
 			contents := []*genai.Content{{Parts: parts}}
 
-			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, nil)
+			var genConfig *genai.GenerateContentConfig
+			if c.config.MaxOutputTokens > 0 {
+				genConfig = &genai.GenerateContentConfig{
+					MaxOutputTokens: int32(c.config.MaxOutputTokens),
+				}
+			}
+
+			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, genConfig)
 			if err != nil {
 				return err
 			}
@@ -108,9 +137,19 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 	var usage *TokenUsage
 
 	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				return err
+			}
+		}
+
 		return c.retry.Execute(ctx, func() error {
 			parts := []*genai.Part{{Text: prompt}}
 			contents := []*genai.Content{{Parts: parts}}
+
+			if c.config.MaxOutputTokens > 0 && cfg.MaxOutputTokens == 0 {
+				cfg.MaxOutputTokens = int32(c.config.MaxOutputTokens)
+			}
 
 			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, cfg)
 			if err != nil {
@@ -147,6 +186,12 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	var embeddings [][]float32
 
 	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
+		if c.rateLimiter != nil {
+			if err := c.rateLimiter.Wait(ctx); err != nil {
+				return err
+			}
+		}
+
 		return c.retry.Execute(ctx, func() error {
 			contents := make([]*genai.Content, len(texts))
 			for i, text := range texts {
