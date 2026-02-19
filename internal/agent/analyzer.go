@@ -84,20 +84,20 @@ func (a *Analyzer) AnalyzeSync(ctx context.Context, paperID, abstract, pdfURL st
 		fullText = abstract
 	}
 
-	prompt := fmt.Sprintf(`Analyze the following academic paper and extract structured information.
+	prompt := fmt.Sprintf(`Analyze this academic paper and extract BRIEF structured information.
 
 Text: %s
 
-Extract and respond in JSON format:
+Respond with ONLY valid JSON. Keep each field under 100 characters.
 {
-  "problem_statement": "What problem does this paper address?",
-  "methodology": "What methods/approaches are used?",
-  "dataset": "What datasets are used (or 'Not specified')?",
+  "problem_statement": "One sentence problem summary",
+  "methodology": "One sentence method summary",
+  "dataset": "Dataset name or 'Not specified'",
   "evaluation_metrics": ["metric1", "metric2"],
-  "key_findings": "Main findings in 2-3 sentences",
-  "limitations": "Limitations acknowledged by authors",
-  "future_work": "Future work suggested by authors"
-}`, truncateText(fullText, 30000))
+  "key_findings": "One sentence main finding",
+  "limitations": "One sentence limitation",
+  "future_work": "One sentence future work"
+}`, truncateText(fullText, 10000))
 
 	schema := map[string]interface{}{
 		"problem_statement":  "",
@@ -114,8 +114,20 @@ Extract and respond in JSON format:
 		return nil, fmt.Errorf("failed to analyze paper: %w", err)
 	}
 
+	logger.Debug().
+		Str("paper_id", paperID).
+		Int("result_len", len(result)).
+		Str("result", truncateText(result, 500)).
+		Msg("LLM analysis result")
+
 	var analysis PaperAnalysis
 	if err := json.Unmarshal([]byte(result), &analysis); err != nil {
+		logger.Error().
+			Err(err).
+			Str("paper_id", paperID).
+			Int("result_len", len(result)).
+			Str("result", truncateText(result, 1000)).
+			Msg("Failed to parse LLM analysis response")
 		return nil, fmt.Errorf("failed to parse analysis: %w", err)
 	}
 
