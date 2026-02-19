@@ -230,6 +230,18 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 }
 
 func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
+	total := len(papers)
+
+	maxAnalyze := o.config.Pipeline.PapersToAnalyze
+	if maxAnalyze > 0 && len(papers) > maxAnalyze {
+		logger.Info().
+			Int("discovered", len(papers)).
+			Int("analyzing", maxAnalyze).
+			Msg("Limiting papers to analyze")
+		papers = papers[:maxAnalyze]
+		total = maxAnalyze
+	}
+
 	for i, paper := range papers {
 		select {
 		case <-ctx.Done():
@@ -237,20 +249,68 @@ func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, pa
 		default:
 		}
 
-		progress := 0.35 + (float64(i)/float64(len(papers)))*0.30
+		if i > 0 && o.config.Pipeline.AnalysisDelay > 0 {
+			time.Sleep(o.config.Pipeline.AnalysisDelay)
+		}
+
+		progress := 0.35 + (float64(i)/float64(total))*0.30
 		o.sse.Broadcast(progressEvent{TopicID: topicID, Stage: "paper_analysis", Progress: progress})
 
 		analysis, err := o.analyzer.AnalyzeSync(ctx, paper.ID, paper.Abstract, "")
 		if err != nil {
-			logger.Warn().Err(err).Str("paper_id", paper.ID).Msg("Failed to analyze paper")
+			if isDailyLimitExceeded(err) {
+				logger.Warn().
+					Err(err).
+					Int("completed", i).
+					Int("total", total).
+					Msg("Daily LLM limit exceeded, skipping remaining papers")
+				break
+			}
+
+			logger.Warn().
+				Err(err).
+				Str("paper_id", paper.ID).
+				Str("title", paper.Title).
+				Int("completed", i).
+				Int("total", total).
+				Msg("Failed to analyze paper")
 			continue
 		}
 
 		if err := o.analyzer.StoreAnalysis(ctx, paper.ID, analysis); err != nil {
 			logger.Warn().Err(err).Str("paper_id", paper.ID).Msg("Failed to store analysis")
 		}
+
+		logger.Info().
+			Str("paper_id", paper.ID).
+			Int("completed", i+1).
+			Int("total", total).
+			Float64("progress", float64(i+1)/float64(total)*100).
+			Msg("Paper analysis completed")
 	}
 	return nil
+}
+
+func isDailyLimitExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return contains(errStr, "daily request limit exceeded") ||
+		contains(errStr, "RESOURCE_EXHAUSTED") && contains(errStr, "per day")
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic string, expanded *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error) {
