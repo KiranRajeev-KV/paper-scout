@@ -82,6 +82,14 @@ func inferSchema(v interface{}) (*genai.Schema, error) {
 	case bool:
 		return &genai.Schema{Type: genai.TypeBoolean}, nil
 
+	case []string:
+		return &genai.Schema{
+			Type: genai.TypeArray,
+			Items: &genai.Schema{
+				Type: genai.TypeString,
+			},
+		}, nil
+
 	case []interface{}:
 		if len(t) == 0 {
 			return &genai.Schema{
