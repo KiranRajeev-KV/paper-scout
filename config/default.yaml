@@ -38,6 +38,9 @@ llm:
   base_backoff: 500ms
   max_backoff: 2s
   timeout: 30s
+  max_output_tokens: 1024
+  requests_per_minute: 15
+  requests_per_day: 1000
 
 apis:
   semantic_scholar:
@@ -45,7 +48,7 @@ apis:
     base_url: "https://api.semanticscholar.org/graph/v1"
     rate_limit:
       requests_per_second: 0.33
-      burst: 5
+      burst: 1
     timeout: 30s
 
   arxiv:
@@ -62,6 +65,8 @@ apis:
 pipeline:
   max_papers: 50
   min_papers_for_analysis: 5
+  papers_to_analyze: 20
+  analysis_delay: 4s
   worker_pool_size: 10
   job_timeout: 60s
   pdf_download_timeout: 15s

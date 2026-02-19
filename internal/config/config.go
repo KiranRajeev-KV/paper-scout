@@ -78,14 +78,17 @@ func (q QdrantConfig) Addr() string {
 }
 
 type LLMConfig struct {
-	Provider       string        `koanf:"provider"`
-	APIKey         string        `koanf:"api_key"`
-	Model          string        `koanf:"model"`
-	EmbeddingModel string        `koanf:"embedding_model"`
-	MaxRetries     int           `koanf:"max_retries"`
-	BaseBackoff    time.Duration `koanf:"base_backoff"`
-	MaxBackoff     time.Duration `koanf:"max_backoff"`
-	Timeout        time.Duration `koanf:"timeout"`
+	Provider          string        `koanf:"provider"`
+	APIKey            string        `koanf:"api_key"`
+	Model             string        `koanf:"model"`
+	EmbeddingModel    string        `koanf:"embedding_model"`
+	MaxRetries        int           `koanf:"max_retries"`
+	BaseBackoff       time.Duration `koanf:"base_backoff"`
+	MaxBackoff        time.Duration `koanf:"max_backoff"`
+	Timeout           time.Duration `koanf:"timeout"`
+	MaxOutputTokens   int           `koanf:"max_output_tokens"`
+	RequestsPerMinute int           `koanf:"requests_per_minute"`
+	RequestsPerDay    int           `koanf:"requests_per_day"`
 }
 
 type APIsConfig struct {
@@ -120,6 +123,8 @@ type UnstructuredConfig struct {
 type PipelineConfig struct {
 	MaxPapers            int           `koanf:"max_papers"`
 	MinPapersForAnalysis int           `koanf:"min_papers_for_analysis"`
+	PapersToAnalyze      int           `koanf:"papers_to_analyze"`
+	AnalysisDelay        time.Duration `koanf:"analysis_delay"`
 	WorkerPoolSize       int           `koanf:"worker_pool_size"`
 	JobTimeout           time.Duration `koanf:"job_timeout"`
 	PDFDownloadTimeout   time.Duration `koanf:"pdf_download_timeout"`
