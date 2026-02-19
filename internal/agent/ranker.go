@@ -2,23 +2,35 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/research-agent/internal/llm"
 	"github.com/research-agent/internal/logger"
 	"github.com/research-agent/internal/storage/postgres"
 	"github.com/research-agent/internal/tools/embedding"
 )
 
+const (
+	RerankBatchSize = 10
+	RerankTopK      = 50
+)
+
 type Ranker struct {
-	postgres *postgres.Client
-	embedder *embedding.Generator
+	postgres   *postgres.Client
+	embedder   *embedding.Generator
+	llm        *llm.Client
+	structured *llm.StructuredOutput
 }
 
-func NewRanker(pg *postgres.Client, emb *embedding.Generator) *Ranker {
+func NewRanker(pg *postgres.Client, emb *embedding.Generator, llmClient *llm.Client) *Ranker {
 	return &Ranker{
-		postgres: pg,
-		embedder: emb,
+		postgres:   pg,
+		embedder:   emb,
+		llm:        llmClient,
+		structured: llm.NewStructuredOutput(llmClient),
 	}
 }
 
@@ -27,6 +39,11 @@ type RankedPaper struct {
 	Title          string
 	Abstract       string
 	RelevanceScore float64
+}
+
+type paperWithScore struct {
+	paper *postgres.Paper
+	score float64
 }
 
 func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPapers int) ([]RankedPaper, error) {
@@ -46,11 +63,6 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 	}
 
 	logger.Info().Int("papers", len(papers)).Msg("Papers retrieved for ranking")
-
-	type paperWithScore struct {
-		paper *postgres.Paper
-		score float64
-	}
 
 	var scored []paperWithScore
 
@@ -76,6 +88,21 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
+
+	topK := RerankTopK
+	if len(scored) < topK {
+		topK = len(scored)
+	}
+	scored = scored[:topK]
+
+	if r.llm != nil && len(scored) > 0 {
+		reranked, err := r.rerankWithLLM(ctx, topic, scored)
+		if err != nil {
+			logger.Warn().Err(err).Msg("LLM reranking failed, using embedding scores")
+		} else {
+			scored = reranked
+		}
+	}
 
 	if len(scored) > maxPapers {
 		scored = scored[:maxPapers]
@@ -104,6 +131,111 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		Msg("Paper ranking complete")
 
 	return ranked, nil
+}
+
+func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paperWithScore) ([]paperWithScore, error) {
+	logger.Info().Int("papers", len(papers)).Msg("Starting LLM reranking")
+
+	allScored := make([]paperWithScore, 0, len(papers))
+
+	for i := 0; i < len(papers); i += RerankBatchSize {
+		end := i + RerankBatchSize
+		if end > len(papers) {
+			end = len(papers)
+		}
+		batch := papers[i:end]
+
+		batchScored, err := r.rerankBatch(ctx, topic, batch)
+		if err != nil {
+			logger.Warn().Err(err).Int("batch_start", i).Msg("Failed to rerank batch")
+			allScored = append(allScored, batch...)
+			continue
+		}
+
+		allScored = append(allScored, batchScored...)
+	}
+
+	sort.Slice(allScored, func(i, j int) bool {
+		return allScored[i].score > allScored[j].score
+	})
+
+	logger.Info().Int("papers", len(allScored)).Msg("LLM reranking complete")
+	return allScored, nil
+}
+
+func (r *Ranker) rerankBatch(ctx context.Context, topic string, papers []paperWithScore) ([]paperWithScore, error) {
+	var paperList strings.Builder
+	for i, p := range papers {
+		abstract := truncateText(pgTextVal(p.paper.Abstract), 500)
+		paperList.WriteString(fmt.Sprintf("\n[%d] Title: %s\n    Abstract: %s", i+1, p.paper.Title, abstract))
+	}
+
+	prompt := fmt.Sprintf(`You are a research assistant. Rank the following papers by relevance to the given research topic.
+
+Research Topic: %s
+
+Papers:%s
+
+For each paper, provide a relevance score from 0.0 to 1.0 based on:
+- Direct relevance to the topic
+- Quality of methodology (if discernible from abstract)
+- Significance of contribution
+
+Respond in JSON format:
+{
+  "scores": [
+    {"index": 1, "score": 0.95, "reason": "brief reason"},
+    {"index": 2, "score": 0.75, "reason": "brief reason"},
+    ...
+  ]
+}`, topic, paperList.String())
+
+	schema := map[string]interface{}{
+		"scores": []map[string]interface{}{
+			{
+				"index":  0,
+				"score":  0.0,
+				"reason": "",
+			},
+		},
+	}
+
+	result, err := r.structured.Generate(ctx, prompt, schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate rerank scores: %w", err)
+	}
+
+	var response struct {
+		Scores []struct {
+			Index  int     `json:"index"`
+			Score  float64 `json:"score"`
+			Reason string  `json:"reason"`
+		} `json:"scores"`
+	}
+
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse rerank response: %w", err)
+	}
+
+	scoreMap := make(map[int]float64)
+	for _, s := range response.Scores {
+		if s.Index >= 1 && s.Index <= len(papers) {
+			scoreMap[s.Index-1] = s.Score
+		}
+	}
+
+	resultPapers := make([]paperWithScore, len(papers))
+	for i, p := range papers {
+		resultPapers[i] = paperWithScore{
+			paper: p.paper,
+			score: p.score,
+		}
+		if llmScore, ok := scoreMap[i]; ok {
+			resultPapers[i].score = 0.3*p.score + 0.7*llmScore
+		}
+	}
+
+	return resultPapers, nil
 }
 
 func cosineSimilarity(a, b []float32) float64 {

@@ -103,7 +103,7 @@ func NewOrchestrator(
 
 	o.queryExpander = agent.NewQueryExpander(llmClient, pg)
 	o.paperDiscoverer = agent.NewPaperDiscoverer(ssClient, arxivClient, pg, cfg.Pipeline.MaxPapers)
-	o.ranker = agent.NewRanker(pg, embedder)
+	o.ranker = agent.NewRanker(pg, embedder, llmClient)
 	o.analyzer = agent.NewAnalyzer(llmClient, pg, downloader, parser, pool)
 	o.gapDetector = agent.NewGapDetector(llmClient, pg)
 	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
