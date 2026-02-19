@@ -38,7 +38,7 @@ type ExternalIDs struct {
 	ArXiv  string `json:"ArXiv"`
 	PMID   string `json:"PubMed"`
 	PMCID  string `json:"PubMedCentral"`
-	MAG    int    `json:"MAG"`
+	MAG    string `json:"MAG"`
 	ACL    string `json:"ACL"`
 	Corpus int64  `json:"CorpusId"`
 }
