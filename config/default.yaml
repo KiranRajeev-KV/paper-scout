@@ -1,47 +1,47 @@
 server:
-  host: "${SERVER_HOST:localhost}"
-  port: ${SERVER_PORT:8080}
-  read_timeout: "${SERVER_READ_TIMEOUT:30s}"
-  write_timeout: "${SERVER_WRITE_TIMEOUT:30s}"
+  host: localhost
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
 
 database:
   postgres:
-    host: "${DATABASE_POSTGRES_HOST:postgres}"
-    port: ${DATABASE_POSTGRES_PORT:5432}
-    database: "${DATABASE_POSTGRES_DATABASE:research_agent}"
-    user: "${DATABASE_POSTGRES_USER:research}"
-    password: "${DATABASE_POSTGRES_PASSWORD:research123}"
-    sslmode: "${DATABASE_POSTGRES_SSLMODE:disable}"
-    max_connections: ${DATABASE_POSTGRES_MAX_CONNECTIONS:10}
-    max_idle: ${DATABASE_POSTGRES_MAX_IDLE:5}
-    conn_timeout: "${DATABASE_POSTGRES_CONN_TIMEOUT:30s}"
+    host: postgres
+    port: 5432
+    database: research_agent
+    user: research
+    password: research123
+    sslmode: disable
+    max_connections: 10
+    max_idle: 5
+    conn_timeout: 30s
 
   redis:
-    host: "${DATABASE_REDIS_HOST:redis}"
-    port: ${DATABASE_REDIS_PORT:6379}
-    password: "${DATABASE_REDIS_PASSWORD:}"
-    db: ${DATABASE_REDIS_DB:0}
-    pool_size: ${DATABASE_REDIS_POOL_SIZE:10}
+    host: redis
+    port: 6379
+    password: ""
+    db: 0
+    pool_size: 10
 
   qdrant:
-    host: "${DATABASE_QDRANT_HOST:qdrant}"
-    port: ${DATABASE_QDRANT_PORT:6333}
-    collection: "${DATABASE_QDRANT_COLLECTION:default}"
-    api_key: "${DATABASE_QDRANT_API_KEY:}"
+    host: qdrant
+    port: 6333
+    collection: default
+    api_key: ""
 
 llm:
-  provider: "${LLM_PROVIDER:gemini}"
-  api_key: "${LLM_API_KEY}"
-  model: "${LLM_MODEL:gemini-2.5-flash}"
-  embedding_model: "${LLM_EMBEDDING_MODEL:gemini-embbeding-001}"
-  max_retries: ${LLM_MAX_RETRIES:3}
-  base_backoff: "${LLM_BASE_BACKOFF:500ms}"
-  max_backoff: "${LLM_MAX_BACKOFF:2s}"
-  timeout: "${LLM_TIMEOUT:30s}"
+  provider: gemini
+  api_key: ""
+  model: gemini-2.5-flash
+  embedding_model: gemini-embbeding-001
+  max_retries: 3
+  base_backoff: 500ms
+  max_backoff: 2s
+  timeout: 30s
 
 apis:
   semantic_scholar:
-    api_key: "${APIS_SEMANTIC_SCHOLAR_API_KEY:}"
+    api_key: ""
     base_url: "https://api.semanticscholar.org/graph/v1"
     rate_limit:
       requests_per_second: 0.33
@@ -56,22 +56,22 @@ apis:
     timeout: 60s
 
   unstructured:
-    base_url: "${APIS_UNSTRUCTURED_BASEURL:http://localhost:8000}"
-    timeout: "${APIS_UNSTRUCTURED_TIMEOUT:60s}"
+    base_url: "http://localhost:8000"
+    timeout: 60s
 
 pipeline:
-  max_papers: ${PIPELINE_MAX_PAPERS:50}
-  min_papers_for_analysis: ${PIPELINE_MIN_PAPERS_FOR_ANALYSIS:5}
-  worker_pool_size: ${PIPELINE_WORKER_POOL_SIZE:10}
-  job_timeout: "${PIPELINE_JOB_TIMEOUT:60s}"
-  pdf_download_timeout: "${PIPELINE_PDF_DOWNLOAD_TIMEOUT:15s}"
-  use_redis_queue: ${PIPELINE_USE_REDIS_QUEUE:false}
+  max_papers: 50
+  min_papers_for_analysis: 5
+  worker_pool_size: 10
+  job_timeout: 60s
+  pdf_download_timeout: 15s
+  use_redis_queue: false
 
 cache:
-  default_ttl: "${CACHE_DEFAULT_TTL:10m}"
-  search_ttl: "${CACHE_SEARCH_TTL:60m}"
-  embedding_ttl: "${CACHE_EMBEDDING_TTL:1440m}"
+  default_ttl: 10m
+  search_ttl: 60m
+  embedding_ttl: 1440m
 
 logging:
-  level: "${LOGGING_LEVEL:info}"
-  format: "${LOGGING_FORMAT:console}"
+  level: info
+  format: console

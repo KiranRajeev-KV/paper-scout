@@ -145,7 +145,8 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	if err := k.Load(env.ProviderWithValue("", ".", func(s string, v string) (string, interface{}) {
-		key := strings.ToLower(strings.ReplaceAll(s, "_", "."))
+		key := strings.ToLower(s)
+		key = strings.ReplaceAll(key, "__", ".")
 		if strings.Contains(v, ",") {
 			return key, strings.Split(v, ",")
 		}

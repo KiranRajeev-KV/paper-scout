@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/research-agent/internal/api"
 	"github.com/research-agent/internal/config"
 	"github.com/research-agent/internal/llm"
@@ -22,6 +23,10 @@ import (
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		fmt.Fprintln(os.Stderr, "No .env file found, using environment variables")
+	}
+
 	ctx := context.Background()
 
 	cfg, err := config.LoadDefault()
