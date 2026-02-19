@@ -65,6 +65,7 @@ pipeline:
   worker_pool_size: ${WORKER_POOL_SIZE:10}
   job_timeout: 10m
   pdf_download_timeout: 60s
+  use_redis_queue: ${USE_REDIS_QUEUE:true}
 
 cache:
   default_ttl: 24h

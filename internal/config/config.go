@@ -123,6 +123,7 @@ type PipelineConfig struct {
 	WorkerPoolSize       int           `koanf:"worker_pool_size"`
 	JobTimeout           time.Duration `koanf:"job_timeout"`
 	PDFDownloadTimeout   time.Duration `koanf:"pdf_download_timeout"`
+	UseRedisQueue        bool          `koanf:"use_redis_queue"`
 }
 
 type CacheConfig struct {

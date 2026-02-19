@@ -85,7 +85,16 @@ func NewOrchestrator(
 
 	embedder := embedding.NewGenerator(llmClient, qdrantClient)
 
-	pool := worker.NewPool(cfg.Pipeline.WorkerPoolSize, 100)
+	var pool *worker.Pool
+	if cfg.Pipeline.UseRedisQueue {
+		redisQueue := redis.NewQueue(redisClient.Client())
+		pool = worker.NewRedisPool(cfg.Pipeline.WorkerPoolSize, redisQueue)
+		logger.Info().Msg("Using Redis queue for worker pool")
+	} else {
+		pool = worker.NewPool(cfg.Pipeline.WorkerPoolSize, 100)
+		logger.Info().Msg("Using local queue for worker pool")
+	}
+
 	processor := worker.NewProcessor(pg, downloader, parser, embedder)
 	pool.SetHandler(processor.CreateHandler())
 	pool.Start()
