@@ -52,10 +52,12 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		Str("topic", topic).
 		Msg("Starting paper ranking")
 
+	logger.Info().Msg("Embedding topic...")
 	topicVector, err := r.embedder.Generate(ctx, topic)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed topic: %w", err)
 	}
+	logger.Info().Msg("Topic embedded successfully")
 
 	papers, err := r.postgres.Queries().GetPapersByTopic(ctx, pgUUID(topicID))
 	if err != nil {
@@ -65,12 +67,20 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 	logger.Info().Int("papers", len(papers)).Msg("Papers retrieved for ranking")
 
 	var scored []paperWithScore
+	total := len(papers)
 
-	for _, paper := range papers {
+	for i, paper := range papers {
 		abstract := pgTextVal(paper.Abstract)
 		if abstract == "" {
+			logger.Debug().Int("paper", i+1).Msg("Skipping paper with no abstract")
 			continue
 		}
+
+		logger.Info().
+			Int("current", i+1).
+			Int("total", total).
+			Float64("progress", float64(i+1)/float64(total)*100).
+			Msg("Embedding paper abstract")
 
 		abstractVector, err := r.embedder.Generate(ctx, abstract)
 		if err != nil {
@@ -85,6 +95,8 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		})
 	}
 
+	logger.Info().Int("scored", len(scored)).Msg("Embedding complete, sorting by similarity")
+
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
@@ -94,6 +106,8 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		topK = len(scored)
 	}
 	scored = scored[:topK]
+
+	logger.Info().Int("papers", topK).Msg("Top papers selected for LLM reranking")
 
 	if r.llm != nil && len(scored) > 0 {
 		reranked, err := r.rerankWithLLM(ctx, topic, scored)
@@ -107,6 +121,8 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 	if len(scored) > maxPapers {
 		scored = scored[:maxPapers]
 	}
+
+	logger.Info().Int("papers", len(scored)).Msg("Storing relevance scores")
 
 	ranked := make([]RankedPaper, 0, len(scored))
 	for _, s := range scored {
@@ -137,6 +153,7 @@ func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paper
 	logger.Info().Int("papers", len(papers)).Msg("Starting LLM reranking")
 
 	allScored := make([]paperWithScore, 0, len(papers))
+	totalBatches := (len(papers) + RerankBatchSize - 1) / RerankBatchSize
 
 	for i := 0; i < len(papers); i += RerankBatchSize {
 		end := i + RerankBatchSize
@@ -144,6 +161,13 @@ func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paper
 			end = len(papers)
 		}
 		batch := papers[i:end]
+		batchNum := (i / RerankBatchSize) + 1
+
+		logger.Info().
+			Int("batch", batchNum).
+			Int("total_batches", totalBatches).
+			Int("papers_in_batch", len(batch)).
+			Msg("Processing rerank batch")
 
 		batchScored, err := r.rerankBatch(ctx, topic, batch)
 		if err != nil {
@@ -153,6 +177,7 @@ func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paper
 		}
 
 		allScored = append(allScored, batchScored...)
+		logger.Info().Int("batch", batchNum).Msg("Batch reranked successfully")
 	}
 
 	sort.Slice(allScored, func(i, j int) bool {
