@@ -58,8 +58,8 @@ apis:
       burst: 1
     timeout: 60s
 
-  unstructured:
-    base_url: "http://localhost:8000"
+  grobid:
+    base_url: "http://localhost:8070"
     timeout: 60s
 
 pipeline:

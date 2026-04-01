@@ -94,7 +94,7 @@ type LLMConfig struct {
 type APIsConfig struct {
 	SemanticScholar SemanticScholarConfig `koanf:"semantic_scholar"`
 	ArXiv           ArXivConfig           `koanf:"arxiv"`
-	Unstructured    UnstructuredConfig    `koanf:"unstructured"`
+	Grobid          GrobidConfig          `koanf:"grobid"`
 }
 
 type RateLimitConfig struct {
@@ -115,7 +115,7 @@ type ArXivConfig struct {
 	Timeout   time.Duration   `koanf:"timeout"`
 }
 
-type UnstructuredConfig struct {
+type GrobidConfig struct {
 	BaseURL string        `koanf:"base_url"`
 	Timeout time.Duration `koanf:"timeout"`
 }

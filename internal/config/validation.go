@@ -97,7 +97,7 @@ func (a APIsConfig) Validate() error {
 	return validation.ValidateStruct(&a,
 		validation.Field(&a.SemanticScholar, validation.Required),
 		validation.Field(&a.ArXiv, validation.Required),
-		validation.Field(&a.Unstructured, validation.Required),
+		validation.Field(&a.Grobid, validation.Required),
 	)
 }
 
@@ -117,10 +117,10 @@ func (a ArXivConfig) Validate() error {
 	)
 }
 
-func (u UnstructuredConfig) Validate() error {
-	return validation.ValidateStruct(&u,
-		validation.Field(&u.BaseURL, validation.Required),
-		validation.Field(&u.Timeout, validation.Required),
+func (g GrobidConfig) Validate() error {
+	return validation.ValidateStruct(&g,
+		validation.Field(&g.BaseURL, validation.Required),
+		validation.Field(&g.Timeout, validation.Required),
 	)
 }
 
