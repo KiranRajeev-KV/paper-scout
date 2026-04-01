@@ -10,16 +10,16 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/research-agent/internal/api"
-	"github.com/research-agent/internal/config"
-	"github.com/research-agent/internal/llm"
-	"github.com/research-agent/internal/logger"
-	"github.com/research-agent/internal/orchestrator"
-	"github.com/research-agent/internal/storage/postgres"
-	"github.com/research-agent/internal/storage/qdrant"
-	"github.com/research-agent/internal/storage/redis"
-	"github.com/research-agent/internal/tools/arxiv"
-	"github.com/research-agent/internal/tools/semantic_scholar"
+	"github.com/paper-scout/internal/api"
+	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/llm"
+	"github.com/paper-scout/internal/logger"
+	"github.com/paper-scout/internal/orchestrator"
+	"github.com/paper-scout/internal/storage/postgres"
+	"github.com/paper-scout/internal/storage/qdrant"
+	"github.com/paper-scout/internal/storage/redis"
+	"github.com/paper-scout/internal/tools/arxiv"
+	"github.com/paper-scout/internal/tools/semantic_scholar"
 )
 
 func main() {

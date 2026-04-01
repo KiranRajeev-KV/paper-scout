@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/research-agent/internal/llm"
-	"github.com/research-agent/internal/logger"
-	"github.com/research-agent/internal/storage/postgres"
+	"github.com/paper-scout/internal/llm"
+	"github.com/paper-scout/internal/logger"
+	"github.com/paper-scout/internal/storage/postgres"
 )
 
 type GapDetector struct {

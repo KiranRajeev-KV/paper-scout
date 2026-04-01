@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/research-agent/internal/logger"
-	"github.com/research-agent/internal/storage/redis"
+	"github.com/paper-scout/internal/logger"
+	"github.com/paper-scout/internal/storage/redis"
 )
 
 type StateManager struct {

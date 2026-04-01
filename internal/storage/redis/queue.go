@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/logger"
 )
 
 const (

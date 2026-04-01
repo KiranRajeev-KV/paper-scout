@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/research-agent/internal/circuitbreaker"
-	"github.com/research-agent/internal/config"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/circuitbreaker"
+	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/logger"
 )
 
 const (

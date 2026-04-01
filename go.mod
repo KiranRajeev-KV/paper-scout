@@ -1,4 +1,4 @@
-module github.com/research-agent
+module github.com/paper-scout
 
 go 1.24.0
 

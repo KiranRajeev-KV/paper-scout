@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/research-agent/internal/api/handler"
-	"github.com/research-agent/internal/api/middleware"
-	"github.com/research-agent/internal/orchestrator"
+	"github.com/paper-scout/internal/api/handler"
+	"github.com/paper-scout/internal/api/middleware"
+	"github.com/paper-scout/internal/orchestrator"
 )
 
 func SetupRouter(orch *orchestrator.Orchestrator) *gin.Engine {

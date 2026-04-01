@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/logger"
 )
 
 type SSEManager struct {

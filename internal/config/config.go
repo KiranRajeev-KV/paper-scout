@@ -9,7 +9,7 @@ import (
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/logger"
 )
 
 type Config struct {

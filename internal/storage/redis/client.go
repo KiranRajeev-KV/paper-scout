@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/research-agent/internal/config"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/logger"
 )
 
 type Client struct {

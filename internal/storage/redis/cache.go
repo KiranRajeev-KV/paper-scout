@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/research-agent/internal/config"
+	"github.com/paper-scout/internal/config"
 )
 
 const (

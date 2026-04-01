@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/logger"
 )
 
 type Downloader struct {

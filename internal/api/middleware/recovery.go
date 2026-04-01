@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/logger"
 )
 
 func Recovery() gin.HandlerFunc {

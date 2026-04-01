@@ -7,8 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/research-agent/internal/config"
-	"github.com/research-agent/internal/logger"
+	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/logger"
 )
 
 type Client struct {

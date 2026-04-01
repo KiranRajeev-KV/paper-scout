@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/research-agent/internal/storage/postgres"
-	"github.com/research-agent/internal/storage/qdrant"
-	"github.com/research-agent/internal/storage/redis"
+	"github.com/paper-scout/internal/storage/postgres"
+	"github.com/paper-scout/internal/storage/qdrant"
+	"github.com/paper-scout/internal/storage/redis"
 )
 
 type HealthHandler struct {

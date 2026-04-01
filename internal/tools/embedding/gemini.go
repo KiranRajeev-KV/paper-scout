@@ -6,9 +6,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
-	"github.com/research-agent/internal/llm"
-	"github.com/research-agent/internal/logger"
-	qdrantstore "github.com/research-agent/internal/storage/qdrant"
+	"github.com/paper-scout/internal/llm"
+	"github.com/paper-scout/internal/logger"
+	qdrantstore "github.com/paper-scout/internal/storage/qdrant"
 )
 
 type Generator struct {

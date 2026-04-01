@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/research-agent/internal/logger"
-	"github.com/research-agent/internal/storage/postgres"
-	"github.com/research-agent/internal/tools/embedding"
-	"github.com/research-agent/internal/tools/pdf"
+	"github.com/paper-scout/internal/logger"
+	"github.com/paper-scout/internal/storage/postgres"
+	"github.com/paper-scout/internal/tools/embedding"
+	"github.com/paper-scout/internal/tools/pdf"
 )
 
 type Processor struct {

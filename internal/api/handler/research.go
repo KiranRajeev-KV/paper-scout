@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/research-agent/internal/agent"
-	"github.com/research-agent/internal/orchestrator"
+	"github.com/paper-scout/internal/agent"
+	"github.com/paper-scout/internal/orchestrator"
 )
 
 type Handler struct {

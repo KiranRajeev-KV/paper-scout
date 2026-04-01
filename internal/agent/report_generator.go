@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/research-agent/internal/logger"
-	"github.com/research-agent/internal/storage/postgres"
-	"github.com/research-agent/internal/tools/bibtex"
+	"github.com/paper-scout/internal/logger"
+	"github.com/paper-scout/internal/storage/postgres"
+	"github.com/paper-scout/internal/tools/bibtex"
 )
 
 type ReportGenerator struct {
