@@ -13,14 +13,14 @@ import (
 type Processor struct {
 	db         *postgres.Client
 	downloader *pdf.Downloader
-	parser     *pdf.UnstructuredClient
+	parser     *pdf.GrobidClient
 	embedder   *embedding.Generator
 }
 
 func NewProcessor(
 	db *postgres.Client,
 	downloader *pdf.Downloader,
-	parser *pdf.UnstructuredClient,
+	parser *pdf.GrobidClient,
 	embedder *embedding.Generator,
 ) *Processor {
 	return &Processor{

@@ -18,11 +18,11 @@ type Analyzer struct {
 	postgres   *postgres.Client
 	structured *llm.StructuredOutput
 	downloader *pdf.Downloader
-	parser     *pdf.UnstructuredClient
+	parser     *pdf.GrobidClient
 	pool       *worker.Pool
 }
 
-func NewAnalyzer(llmClient *llm.Client, pg *postgres.Client, dl *pdf.Downloader, parser *pdf.UnstructuredClient, pool *worker.Pool) *Analyzer {
+func NewAnalyzer(llmClient *llm.Client, pg *postgres.Client, dl *pdf.Downloader, parser *pdf.GrobidClient, pool *worker.Pool) *Analyzer {
 	return &Analyzer{
 		llm:        llmClient,
 		postgres:   pg,

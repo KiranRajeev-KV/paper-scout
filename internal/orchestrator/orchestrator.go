@@ -81,7 +81,7 @@ func NewOrchestrator(
 	arxivClient *arxiv.Client,
 ) *Orchestrator {
 	downloader := pdf.NewDownloader(cfg.Pipeline.PDFDownloadTimeout)
-	parser := pdf.NewUnstructuredClient(cfg.APIs.Unstructured.BaseURL, cfg.APIs.Unstructured.Timeout)
+	parser := pdf.NewGrobidClient(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout)
 
 	embedder := embedding.NewGenerator(llmClient, qdrantClient)
 
