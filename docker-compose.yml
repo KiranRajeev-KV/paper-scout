@@ -51,10 +51,10 @@ services:
       - research-net
     restart: unless-stopped
 
-  unstructured:
-    image: quay.io/unstructured-io/unstructured-api:latest
+  grobid:
+    image: lfoppiano/grobid:0.8.1
     ports:
-      - "8000:8000"
+      - "8070:8070"
     networks:
       - research-net
     restart: unless-stopped
