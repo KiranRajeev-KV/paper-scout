@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
@@ -14,8 +16,11 @@ import (
 )
 
 const (
-	RerankBatchSize = 10
-	RerankTopK      = 50
+	RerankBatchSize        = 10
+	RerankTopK             = 50
+	ChunkTypeAbstract      = "abstract"
+	EmbeddingStatusIndexed = "indexed"
+	EmbeddingStatusFailed  = "failed"
 )
 
 type Ranker struct {
@@ -23,21 +28,38 @@ type Ranker struct {
 	embedder   *embedding.Generator
 	llm        *llm.Client
 	structured *llm.StructuredOutput
+
+	generateFn              func(ctx context.Context, text string) ([]float32, error)
+	generateBatchFn         func(ctx context.Context, texts []string) ([][]float32, error)
+	storeEmbeddingFn        func(ctx context.Context, emb embedding.PaperEmbedding) error
+	searchSimilarFn         func(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*embedding.SearchResult, error)
+	getPapersByTopicFn      func(ctx context.Context, topicID string) ([]*postgres.Paper, error)
+	updateRelevanceScoreFn  func(ctx context.Context, paperID uuid.UUID, score float64) error
+	updateEmbeddingStatusFn func(ctx context.Context, paperID uuid.UUID, status string) error
 }
 
 func NewRanker(pg *postgres.Client, emb *embedding.Generator, llmClient *llm.Client) *Ranker {
-	return &Ranker{
+	ranker := &Ranker{
 		postgres:   pg,
 		embedder:   emb,
 		llm:        llmClient,
 		structured: llm.NewStructuredOutput(llmClient),
 	}
+	ranker.generateFn = emb.Generate
+	ranker.generateBatchFn = emb.GenerateBatch
+	ranker.storeEmbeddingFn = emb.StoreEmbedding
+	ranker.searchSimilarFn = emb.SearchSimilar
+	ranker.getPapersByTopicFn = ranker.getPapersByTopic
+	ranker.updateRelevanceScoreFn = ranker.updateRelevanceScore
+	ranker.updateEmbeddingStatusFn = ranker.updateEmbeddingStatus
+	return ranker
 }
 
 type RankedPaper struct {
 	ID             string
 	Title          string
 	Abstract       string
+	PDFURL         string
 	RelevanceScore float64
 }
 
@@ -52,54 +74,37 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		Str("topic", topic).
 		Msg("Starting paper ranking")
 
-	logger.Info().Msg("Embedding topic...")
-	topicVector, err := r.embedder.Generate(ctx, topic)
+	logger.Info().Msg("Embedding topic for Qdrant search")
+	topicVector, err := r.generateFn(ctx, topic)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed topic: %w", err)
 	}
-	logger.Info().Msg("Topic embedded successfully")
 
-	papers, err := r.postgres.Queries().GetPapersByTopic(ctx, pgUUID(topicID))
+	papers, err := r.getPapersByTopicFn(ctx, topicID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get papers: %w", err)
 	}
 
 	logger.Info().Int("papers", len(papers)).Msg("Papers retrieved for ranking")
 
-	var scored []paperWithScore
-	total := len(papers)
-
-	for i, paper := range papers {
-		abstract := pgTextVal(paper.Abstract)
-		if abstract == "" {
-			logger.Debug().Int("paper", i+1).Msg("Skipping paper with no abstract")
-			continue
-		}
-
-		logger.Info().
-			Int("current", i+1).
-			Int("total", total).
-			Float64("progress", float64(i+1)/float64(total)*100).
-			Msg("Embedding paper abstract")
-
-		abstractVector, err := r.embedder.Generate(ctx, abstract)
-		if err != nil {
-			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to embed abstract")
-			continue
-		}
-
-		score := cosineSimilarity(topicVector, abstractVector)
-		scored = append(scored, paperWithScore{
-			paper: paper,
-			score: score,
-		})
+	queryablePapers, err := r.ensureEmbeddings(ctx, topicID, papers)
+	if err != nil {
+		return nil, err
+	}
+	if len(queryablePapers) == 0 {
+		return nil, fmt.Errorf("no papers with embeddings available for ranking")
 	}
 
-	logger.Info().Int("scored", len(scored)).Msg("Embedding complete, sorting by similarity")
+	queryLimit := rankQueryLimit(len(queryablePapers), maxPapers)
+	searchResults, err := r.searchSimilarFn(ctx, topicVector, uint64(queryLimit), topicID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search qdrant: %w", err)
+	}
 
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
-	})
+	scored := rankSearchResults(searchResults, queryablePapers)
+	if len(scored) == 0 {
+		return nil, fmt.Errorf("qdrant returned no ranked papers for topic %s", topicID)
+	}
 
 	topK := RerankTopK
 	if len(scored) < topK {
@@ -107,18 +112,18 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 	}
 	scored = scored[:topK]
 
-	logger.Info().Int("papers", topK).Msg("Top papers selected for LLM reranking")
+	logger.Info().Int("papers", topK).Msg("Top papers selected from Qdrant for LLM reranking")
 
 	if r.llm != nil && len(scored) > 0 {
 		reranked, err := r.rerankWithLLM(ctx, topic, scored)
 		if err != nil {
-			logger.Warn().Err(err).Msg("LLM reranking failed, using embedding scores")
+			logger.Warn().Err(err).Msg("LLM reranking failed, using Qdrant scores")
 		} else {
 			scored = reranked
 		}
 	}
 
-	if len(scored) > maxPapers {
+	if maxPapers > 0 && len(scored) > maxPapers {
 		scored = scored[:maxPapers]
 	}
 
@@ -130,14 +135,11 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 			ID:             s.paper.ID.String(),
 			Title:          s.paper.Title,
 			Abstract:       pgTextVal(s.paper.Abstract),
+			PDFURL:         pgTextVal(s.paper.PdfUrl),
 			RelevanceScore: s.score,
 		})
 
-		_, err := r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
-			ID:             s.paper.ID,
-			RelevanceScore: pgFloat64(s.score),
-		})
-		if err != nil {
+		if err := r.updateRelevanceScoreFn(ctx, s.paper.ID, s.score); err != nil {
 			logger.Warn().Err(err).Str("paper_id", s.paper.ID.String()).Msg("Failed to update relevance score")
 		}
 	}
@@ -147,6 +149,105 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		Msg("Paper ranking complete")
 
 	return ranked, nil
+}
+
+func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []*postgres.Paper) (map[string]*postgres.Paper, error) {
+	queryablePapers := make(map[string]*postgres.Paper)
+	texts := make([]string, 0, len(papers))
+	papersToEmbed := make([]*postgres.Paper, 0, len(papers))
+
+	for _, paper := range papers {
+		abstract := pgTextVal(paper.Abstract)
+		if abstract == "" {
+			logger.Debug().Str("paper_id", paper.ID.String()).Msg("Skipping paper with no abstract")
+			continue
+		}
+
+		queryablePapers[paper.ID.String()] = paper
+		papersToEmbed = append(papersToEmbed, paper)
+		texts = append(texts, abstract)
+	}
+
+	if len(papersToEmbed) == 0 {
+		return queryablePapers, nil
+	}
+
+	logger.Info().Int("papers", len(papersToEmbed)).Msg("Generating abstract embeddings for Qdrant")
+	vectors, err := r.generateBatchFn(ctx, texts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate paper embeddings: %w", err)
+	}
+	if len(vectors) != len(papersToEmbed) {
+		return nil, fmt.Errorf("embedding vector count mismatch: got %d want %d", len(vectors), len(papersToEmbed))
+	}
+
+	for i, paper := range papersToEmbed {
+		err := r.storeEmbeddingFn(ctx, embedding.PaperEmbedding{
+			PaperID:    paper.ID.String(),
+			TopicID:    topicID,
+			ChunkType:  ChunkTypeAbstract,
+			ChunkIndex: 0,
+			Text:       texts[i],
+			Vector:     vectors[i],
+		})
+		if err != nil {
+			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to store embedding in Qdrant")
+			delete(queryablePapers, paper.ID.String())
+			_ = r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusFailed)
+			continue
+		}
+
+		if err := r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusIndexed); err != nil {
+			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to update embedding status")
+		}
+	}
+
+	return queryablePapers, nil
+}
+
+func rankSearchResults(results []*embedding.SearchResult, papersByID map[string]*postgres.Paper) []paperWithScore {
+	bestByPaper := make(map[string]paperWithScore)
+
+	for _, result := range results {
+		paper, ok := papersByID[result.PaperID]
+		if !ok {
+			continue
+		}
+
+		score := float64(result.Score)
+		current, exists := bestByPaper[result.PaperID]
+		if !exists || score > current.score {
+			bestByPaper[result.PaperID] = paperWithScore{
+				paper: paper,
+				score: score,
+			}
+		}
+	}
+
+	scored := make([]paperWithScore, 0, len(bestByPaper))
+	for _, paper := range bestByPaper {
+		scored = append(scored, paper)
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	return scored
+}
+
+func rankQueryLimit(totalPapers, maxPapers int) int {
+	limit := RerankTopK
+	if maxPapers > limit {
+		limit = maxPapers
+	}
+	if totalPapers < limit {
+		limit = totalPapers
+	}
+	if limit < 1 {
+		return 1
+	}
+	return limit
 }
 
 func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paperWithScore) ([]paperWithScore, error) {
@@ -255,6 +356,29 @@ Respond with JSON only:`, topic, paperList.String())
 	return resultPapers, nil
 }
 
+func (r *Ranker) getPapersByTopic(ctx context.Context, topicID string) ([]*postgres.Paper, error) {
+	return r.postgres.Queries().GetPapersByTopic(ctx, pgUUID(topicID))
+}
+
+func (r *Ranker) updateRelevanceScore(ctx context.Context, paperID uuid.UUID, score float64) error {
+	_, err := r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
+		ID:             paperID,
+		RelevanceScore: pgFloat64(score),
+	})
+	return err
+}
+
+func (r *Ranker) updateEmbeddingStatus(ctx context.Context, paperID uuid.UUID, status string) error {
+	_, err := r.postgres.Queries().UpdatePaperEmbeddingStatus(ctx, postgres.UpdatePaperEmbeddingStatusParams{
+		ID: paperID,
+		EmbeddingStatus: pgtype.Text{
+			String: status,
+			Valid:  status != "",
+		},
+	})
+	return err
+}
+
 type scoreEntry struct {
 	Index  int     `json:"index"`
 	Score  float64 `json:"score"`
@@ -281,34 +405,4 @@ func parseRerankResponse(result string) ([]scoreEntry, error) {
 	}
 
 	return response.Scores, nil
-}
-
-func cosineSimilarity(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-
-	var dotProduct, normA, normB float64
-	for i := range a {
-		dotProduct += float64(a[i]) * float64(b[i])
-		normA += float64(a[i]) * float64(a[i])
-		normB += float64(b[i]) * float64(b[i])
-	}
-
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-
-	return dotProduct / (sqrt(normA) * sqrt(normB))
-}
-
-func sqrt(x float64) float64 {
-	if x <= 0 {
-		return 0
-	}
-	z := x
-	for i := 0; i < 10; i++ {
-		z = z - (z*z-x)/(2*z)
-	}
-	return z
 }
