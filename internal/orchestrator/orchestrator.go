@@ -87,17 +87,15 @@ func NewOrchestrator(
 
 	var pool *worker.Pool
 	if cfg.Pipeline.UseRedisQueue {
-		redisQueue := redis.NewQueue(redisClient.Client())
+		redisQueue := redis.NewQueue(redisClient.Client(), redis.QueueOptions{
+			ClaimIdle: cfg.Pipeline.JobTimeout + time.Minute,
+		})
 		pool = worker.NewRedisPool(cfg.Pipeline.WorkerPoolSize, redisQueue)
 		logger.Info().Msg("Using Redis queue for worker pool")
 	} else {
 		pool = worker.NewPool(cfg.Pipeline.WorkerPoolSize, 100)
 		logger.Info().Msg("Using local queue for worker pool")
 	}
-
-	processor := worker.NewProcessor(pg, downloader, parser, embedder)
-	pool.SetHandler(processor.CreateHandler())
-	pool.Start()
 
 	o := &Orchestrator{
 		config:     cfg,
@@ -114,9 +112,15 @@ func NewOrchestrator(
 	o.paperDiscoverer = agent.NewPaperDiscoverer(ssClient, arxivClient, pg, cfg.Pipeline.MaxPapers)
 	o.ranker = agent.NewRanker(pg, embedder, llmClient)
 	o.analyzer = agent.NewAnalyzer(llmClient, pg, downloader, parser, pool)
+	processor := worker.NewProcessor(pg, downloader, parser, embedder, o.analyzer.HandleJob)
+	pool.SetHandler(processor.CreateHandler())
+	pool.SetCompletionHook(o.analyzer.HandleJobCompletion)
+	pool.Start()
 	o.gapDetector = agent.NewGapDetector(llmClient, pg)
 	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
 	o.reportGenerator = agent.NewReportGenerator(pg)
+
+	o.recoverPipelines(context.Background())
 
 	return o
 }
@@ -190,7 +194,7 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 
 	o.updateStatus(p, StageAnalysis, 0.35, "")
 
-	if err := o.analyzePapersSync(ctx, p.TopicID, ranked); err != nil {
+	if err := o.analyzePapers(ctx, p.TopicID, ranked); err != nil {
 		logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
 	}
 
@@ -229,9 +233,7 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 	logger.Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
 }
 
-func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
-	total := len(papers)
-
+func (o *Orchestrator) analyzePapers(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
 	maxAnalyze := o.config.Pipeline.PapersToAnalyze
 	if maxAnalyze > 0 && len(papers) > maxAnalyze {
 		logger.Info().
@@ -239,78 +241,34 @@ func (o *Orchestrator) analyzePapersSync(ctx context.Context, topicID string, pa
 			Int("analyzing", maxAnalyze).
 			Msg("Limiting papers to analyze")
 		papers = papers[:maxAnalyze]
-		total = maxAnalyze
 	}
 
-	for i, paper := range papers {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	analysisPapers := make([]agent.AnalysisPaper, 0, len(papers))
+	for _, paper := range papers {
+		analysisPapers = append(analysisPapers, agent.AnalysisPaper{
+			ID:       paper.ID,
+			Title:    paper.Title,
+			Abstract: paper.Abstract,
+			PDFURL:   paper.PDFURL,
+		})
+	}
 
-		if i > 0 && o.config.Pipeline.AnalysisDelay > 0 {
-			time.Sleep(o.config.Pipeline.AnalysisDelay)
-		}
+	total := len(analysisPapers)
+	if total == 0 {
+		return nil
+	}
 
-		progress := 0.35 + (float64(i)/float64(total))*0.30
+	return o.analyzer.Analyze(ctx, topicID, analysisPapers, func(completed, total int) {
+		progress := 0.35 + (float64(completed)/float64(total))*0.30
 		o.sse.Broadcast(progressEvent{TopicID: topicID, Stage: "paper_analysis", Progress: progress})
 
-		analysis, err := o.analyzer.AnalyzeSync(ctx, paper.ID, paper.Abstract, "")
-		if err != nil {
-			if isDailyLimitExceeded(err) {
-				logger.Warn().
-					Err(err).
-					Int("completed", i).
-					Int("total", total).
-					Msg("Daily LLM limit exceeded, skipping remaining papers")
-				break
-			}
-
-			logger.Warn().
-				Err(err).
-				Str("paper_id", paper.ID).
-				Str("title", paper.Title).
-				Int("completed", i).
-				Int("total", total).
-				Msg("Failed to analyze paper")
-			continue
-		}
-
-		if err := o.analyzer.StoreAnalysis(ctx, paper.ID, analysis); err != nil {
-			logger.Warn().Err(err).Str("paper_id", paper.ID).Msg("Failed to store analysis")
-		}
-
 		logger.Info().
-			Str("paper_id", paper.ID).
-			Int("completed", i+1).
+			Str("topic_id", topicID).
+			Int("completed", completed).
 			Int("total", total).
-			Float64("progress", float64(i+1)/float64(total)*100).
-			Msg("Paper analysis completed")
-	}
-	return nil
-}
-
-func isDailyLimitExceeded(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return contains(errStr, "daily request limit exceeded") ||
-		contains(errStr, "RESOURCE_EXHAUSTED") && contains(errStr, "per day")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+			Float64("progress", float64(completed)/float64(total)*100).
+			Msg("Paper analysis progress updated")
+	})
 }
 
 func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic string, expanded *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error) {
@@ -435,6 +393,35 @@ func (o *Orchestrator) GetSSEManager() *SSEManager {
 func (o *Orchestrator) Shutdown() {
 	o.workerPool.Stop()
 	logger.Info().Msg("Orchestrator shutdown complete")
+}
+
+func (o *Orchestrator) recoverPipelines(ctx context.Context) {
+	recoverable, err := o.state.ListRecoverable(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Msg("Failed to scan recoverable pipelines")
+		return
+	}
+	if len(recoverable) == 0 {
+		return
+	}
+
+	for _, pipeline := range recoverable {
+		o.mu.Lock()
+		if _, exists := o.pipelines[pipeline.TopicID]; exists {
+			o.mu.Unlock()
+			continue
+		}
+		o.pipelines[pipeline.TopicID] = pipeline
+		o.mu.Unlock()
+
+		logger.Info().
+			Str("topic_id", pipeline.TopicID).
+			Str("stage", string(pipeline.Stage)).
+			Str("status", pipeline.Status).
+			Msg("Recovering persisted pipeline")
+
+		go o.runPipeline(pipeline)
+	}
 }
 
 type statusEvent struct {

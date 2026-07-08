@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/paper-scout/internal/logger"
@@ -61,6 +62,50 @@ func (s *StateManager) Load(ctx context.Context, topicID string) (*Pipeline, err
 func (s *StateManager) Delete(ctx context.Context, topicID string) error {
 	key := "pipeline:" + topicID
 	return s.redis.Del(ctx, key)
+}
+
+func (s *StateManager) ListRecoverable(ctx context.Context) ([]*Pipeline, error) {
+	var (
+		cursor uint64
+		result []*Pipeline
+	)
+
+	for {
+		keys, next, err := s.redis.Scan(ctx, cursor, "pipeline:*", 100)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan pipeline state: %w", err)
+		}
+
+		for _, key := range keys {
+			var state PipelineState
+			if err := s.redis.GetJSON(ctx, key, &state); err != nil {
+				logger.Warn().Err(err).Str("key", key).Msg("Failed to load pipeline state during recovery scan")
+				continue
+			}
+
+			if state.Status == "completed" || state.Status == "failed" {
+				continue
+			}
+
+			result = append(result, &Pipeline{
+				TopicID:   state.TopicID,
+				Topic:     state.Topic,
+				Status:    state.Status,
+				Stage:     Stage(state.Stage),
+				Progress:  state.Progress,
+				StartedAt: state.StartedAt,
+				UpdatedAt: state.UpdatedAt,
+				Error:     state.Error,
+			})
+		}
+
+		if next == 0 {
+			break
+		}
+		cursor = next
+	}
+
+	return result, nil
 }
 
 type PipelineState struct {
