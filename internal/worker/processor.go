@@ -15,6 +15,7 @@ type Processor struct {
 	downloader *pdf.Downloader
 	parser     *pdf.GrobidClient
 	embedder   *embedding.Generator
+	analyzer   JobHandler
 }
 
 func NewProcessor(
@@ -22,12 +23,14 @@ func NewProcessor(
 	downloader *pdf.Downloader,
 	parser *pdf.GrobidClient,
 	embedder *embedding.Generator,
+	analyzer JobHandler,
 ) *Processor {
 	return &Processor{
 		db:         db,
 		downloader: downloader,
 		parser:     parser,
 		embedder:   embedder,
+		analyzer:   analyzer,
 	}
 }
 
@@ -45,45 +48,11 @@ func (p *Processor) HandleJob(ctx context.Context, job Job) error {
 }
 
 func (p *Processor) handlePaperAnalysis(ctx context.Context, job Job) error {
-	paperID := job.GetString("paper_id")
-	pdfURL := job.GetString("pdf_url")
-	abstract := job.GetString("abstract")
-
-	if paperID == "" {
-		return fmt.Errorf("missing paper_id in job payload")
+	if p.analyzer == nil {
+		return fmt.Errorf("paper analysis handler not configured")
 	}
 
-	logger.Info().
-		Str("job_id", job.ID).
-		Str("paper_id", paperID).
-		Msg("Processing paper analysis")
-
-	if pdfURL != "" {
-		filename, data, err := p.downloader.Download(ctx, pdfURL)
-		if err != nil {
-			logger.Warn().
-				Err(err).
-				Str("paper_id", paperID).
-				Msg("PDF download failed, using abstract only")
-		} else {
-			parseResp, err := p.parser.Parse(ctx, filename, data)
-			if err != nil {
-				logger.Warn().
-					Err(err).
-					Str("paper_id", paperID).
-					Msg("PDF parsing failed, using abstract only")
-			} else {
-				fullText := p.parser.ExtractText(parseResp)
-				job.Payload["full_text"] = fullText
-			}
-		}
-	}
-
-	if abstract != "" {
-		job.Payload["full_text"] = abstract
-	}
-
-	return nil
+	return p.analyzer(ctx, job)
 }
 
 func (p *Processor) handlePDFDownload(ctx context.Context, job Job) error {
