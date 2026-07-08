@@ -5,10 +5,10 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/qdrant/go-client/qdrant"
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	qdrantstore "github.com/paper-scout/internal/storage/qdrant"
+	"github.com/qdrant/go-client/qdrant"
 )
 
 type Generator struct {
@@ -41,8 +41,10 @@ type PaperEmbedding struct {
 }
 
 func (g *Generator) StoreEmbedding(ctx context.Context, emb PaperEmbedding) error {
+	pointID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(embeddingKey(emb))).String()
+
 	point := &qdrant.PointStruct{
-		Id:      qdrant.NewIDUUID(uuid.NewString()),
+		Id:      qdrant.NewIDUUID(pointID),
 		Vectors: qdrant.NewVectors(emb.Vector...),
 		Payload: qdrant.NewValueMap(map[string]any{
 			"paper_id":    emb.PaperID,
@@ -64,6 +66,10 @@ func (g *Generator) StoreEmbedding(ctx context.Context, emb PaperEmbedding) erro
 		Msg("Embedding stored")
 
 	return nil
+}
+
+func embeddingKey(emb PaperEmbedding) string {
+	return fmt.Sprintf("%s:%s:%s:%d", emb.TopicID, emb.PaperID, emb.ChunkType, emb.ChunkIndex)
 }
 
 func (g *Generator) SearchSimilar(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*SearchResult, error) {

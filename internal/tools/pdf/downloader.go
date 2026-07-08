@@ -28,6 +28,12 @@ func NewDownloader(timeout time.Duration) *Downloader {
 	}
 }
 
+func (d *Downloader) SetHTTPClient(client *http.Client) {
+	if client != nil {
+		d.httpClient = client
+	}
+}
+
 func (d *Downloader) SetTempDir(dir string) {
 	d.tmpDir = dir
 }

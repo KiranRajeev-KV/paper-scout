@@ -28,6 +28,12 @@ func NewGrobidClient(baseURL string, timeout time.Duration) *GrobidClient {
 	}
 }
 
+func (g *GrobidClient) SetHTTPClient(client *http.Client) {
+	if client != nil {
+		g.httpClient = client
+	}
+}
+
 // TEI XML structures
 type TEI struct {
 	XMLName xml.Name `xml:"TEI"`
@@ -122,7 +128,7 @@ func (g *GrobidClient) ExtractSections(tei *TEI) map[string]string {
 		if div.Head == "" {
 			continue
 		}
-		
+
 		var content strings.Builder
 		for _, p := range div.Ps {
 			content.WriteString(p + "\n")
