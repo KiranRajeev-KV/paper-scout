@@ -25,14 +25,19 @@ cp .env.example .env
 # Edit .env and add your Gemini API key:
 # LLM__API_KEY=your_gemini_api_key_here
 
-# 3. Start all services
+# 3. Start dependencies
 docker compose up -d
 
-# 4. Start a research query
+# 4. Start the API server
+go run ./cmd/server
+
+# 5. Start a research query
 curl -X POST http://localhost:8080/api/v1/research \
   -H "Content-Type: application/json" \
   -d '{"topic": "transformer architectures for time series forecasting"}'
 ```
+
+`docker compose up -d` starts Postgres, Redis, Qdrant, and GROBID. The API server runs separately via `go run ./cmd/server`.
 
 ## Architecture
 
@@ -97,7 +102,7 @@ OUTPUT: Complete Research Report
 
 ## API
 
-Base URL: `http://localhost:8080`
+Base URL: `http://localhost:8080` after starting the server with `go run ./cmd/server`
 
 | Method | Path | Description |
 |--------|------|-------------|

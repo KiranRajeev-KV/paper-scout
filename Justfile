@@ -1,10 +1,10 @@
 # Research AI Agent - Development Commands
 
-# Build and run all services
+# Build/start dependency services
 build:
-    docker compose up --build
+    docker compose up --build -d
 
-# Run in detached mode
+# Run dependencies in detached mode
 up:
     docker compose up -d
 
@@ -16,13 +16,13 @@ down:
 clean:
     docker compose down -v
 
-# View logs
+# View dependency logs
 logs:
-    docker compose logs -f app
+    docker compose logs -f postgres redis qdrant grobid
 
-# Run migrations inside container
+# Run migrations locally (requires goose)
 migrate:
-    docker compose exec app /app/migrate
+    goose -dir migrations postgres "host=localhost port=5432 user=research password=research123 dbname=research_agent sslmode=disable" up
 
 # Generate SQLC code
 sqlc:
@@ -40,7 +40,7 @@ test-coverage:
 build-local:
     go build -o bin/server ./cmd/server
 
-# Run locally (requires services running)
+# Run API locally (requires services running)
 run:
     go run ./cmd/server
 

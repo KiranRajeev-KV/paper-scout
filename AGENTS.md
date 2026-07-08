@@ -111,7 +111,8 @@ Even then, document what you assumed.
 
 ### Infrastructure
 - Docker for everything
-- Must be reproducible via: `docker compose up --build`
+- Dependency services must be reproducible via: `docker compose up --build -d`
+- The API server runs locally via: `go run ./cmd/server`
 
 ### Quality Rules
 - **Never hallucinate citations** - only use API-returned metadata
@@ -570,13 +571,13 @@ See `config/default.yaml` for all configurable options.
 ## Development Commands (Justfile)
 
 ```just
-# Build and run all services
+# Build/start dependency services
 build:
-    docker compose up --build
+    docker compose up --build -d
 
-# Run migrations
+# Run migrations locally
 migrate:
-    docker compose exec app /app/migrate
+    goose -dir migrations postgres "host=localhost port=5432 user=research password=research123 dbname=research_agent sslmode=disable" up
 
 # Generate SQLC code
 sqlc:
@@ -586,9 +587,13 @@ sqlc:
 test:
     go test -v ./...
 
-# View logs
+# View dependency logs
 logs:
-    docker compose logs -f app
+    docker compose logs -f postgres redis qdrant grobid
+
+# Run API locally
+run:
+    go run ./cmd/server
 
 # Clean up
 clean:
