@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/logger"
+	"github.com/redis/go-redis/v9"
 )
 
 type Client struct {
@@ -154,4 +154,8 @@ func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, er
 
 func (c *Client) HDel(ctx context.Context, key string, fields ...string) error {
 	return c.client.HDel(ctx, key, fields...).Err()
+}
+
+func (c *Client) Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error) {
+	return c.client.Scan(ctx, cursor, match, count).Result()
 }
