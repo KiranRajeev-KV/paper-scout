@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/paper-scout/internal/httpresilience"
 	"github.com/paper-scout/internal/logger"
 )
 
@@ -16,6 +17,13 @@ type Downloader struct {
 	httpClient *http.Client
 	timeout    time.Duration
 	tmpDir     string
+	policy     *httpresilience.Policy
+}
+
+func NewDownloaderWithPolicy(timeout time.Duration, policy *httpresilience.Policy) *Downloader {
+	d := NewDownloader(timeout)
+	d.policy = policy
+	return d
 }
 
 func NewDownloader(timeout time.Duration) *Downloader {
@@ -41,15 +49,26 @@ func (d *Downloader) SetTempDir(dir string) {
 func (d *Downloader) Download(ctx context.Context, url string) (string, []byte, error) {
 	start := time.Now()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create request: %w", err)
+	request := func(ctx context.Context) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("User-Agent", "Research-Agent/1.0")
+		return d.httpClient.Do(req)
 	}
-
-	req.Header.Set("User-Agent", "Research-Agent/1.0")
-
-	resp, err := d.httpClient.Do(req)
+	var resp *http.Response
+	var err error
+	if d.policy != nil {
+		resp, err = d.policy.Do(ctx, "download", request)
+	} else {
+		resp, err = request(ctx)
+	}
 	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+			return "", nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
+		}
 		return "", nil, fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()

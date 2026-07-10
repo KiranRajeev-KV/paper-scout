@@ -11,12 +11,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/paper-scout/internal/httpresilience"
 	"github.com/paper-scout/internal/logger"
 )
 
 type GrobidClient struct {
 	httpClient *http.Client
 	baseURL    string
+	policy     *httpresilience.Policy
+}
+
+func NewGrobidClientWithPolicy(baseURL string, timeout time.Duration, policy *httpresilience.Policy) *GrobidClient {
+	client := NewGrobidClient(baseURL, timeout)
+	client.policy = policy
+	return client
 }
 
 func NewGrobidClient(baseURL string, timeout time.Duration) *GrobidClient {
@@ -56,32 +64,41 @@ type Div struct {
 func (g *GrobidClient) Parse(ctx context.Context, filename string, data []byte) (*TEI, error) {
 	start := time.Now()
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	part, err := writer.CreateFormFile("input", filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create form file: %w", err)
-	}
-	if _, err := part.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write file data: %w", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close writer: %w", err)
-	}
-
 	url := fmt.Sprintf("%s/api/processFulltextDocument", g.baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	request := func(ctx context.Context) (*http.Response, error) {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("input", filename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create form file: %w", err)
+		}
+		if _, err := part.Write(data); err != nil {
+			return nil, fmt.Errorf("failed to write file data: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close writer: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", url, body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("Accept", "application/xml")
+		return g.httpClient.Do(req)
 	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Accept", "application/xml")
-
-	resp, err := g.httpClient.Do(req)
+	var resp *http.Response
+	var err error
+	if g.policy != nil {
+		resp, err = g.policy.Do(ctx, "processFulltextDocument", request)
+	} else {
+		resp, err = request(ctx)
+	}
 	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("grobid failed with status %d: %s", resp.StatusCode, string(body))
+		}
 		return nil, fmt.Errorf("grobid request failed: %w", err)
 	}
 	defer resp.Body.Close()

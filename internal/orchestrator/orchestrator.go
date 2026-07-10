@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/paper-scout/internal/agent"
 	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/httpresilience"
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
@@ -91,8 +92,16 @@ func NewOrchestrator(
 		appCtx = context.Background()
 	}
 	appCtx, appCancel := context.WithCancel(appCtx)
-	downloader := pdf.NewDownloader(cfg.Pipeline.PDFDownloadTimeout)
-	parser := pdf.NewGrobidClient(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout)
+	downloader := pdf.NewDownloaderWithPolicy(cfg.Pipeline.PDFDownloadTimeout, httpresilience.New("pdf", httpresilience.Config{
+		MaxRetries: cfg.Pipeline.PDFResilience.MaxRetries, BaseBackoff: cfg.Pipeline.PDFResilience.BaseBackoff,
+		MaxBackoff: cfg.Pipeline.PDFResilience.MaxBackoff, FailureThreshold: cfg.Pipeline.PDFResilience.FailureThreshold,
+		OpenTimeout: cfg.Pipeline.PDFResilience.OpenTimeout,
+	}, cfg.Pipeline.PDFRateLimit.RequestsPerSecond, cfg.Pipeline.PDFRateLimit.Burst, nil))
+	parser := pdf.NewGrobidClientWithPolicy(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout, httpresilience.New("grobid", httpresilience.Config{
+		MaxRetries: cfg.APIs.Grobid.Resilience.MaxRetries, BaseBackoff: cfg.APIs.Grobid.Resilience.BaseBackoff,
+		MaxBackoff: cfg.APIs.Grobid.Resilience.MaxBackoff, FailureThreshold: cfg.APIs.Grobid.Resilience.FailureThreshold,
+		OpenTimeout: cfg.APIs.Grobid.Resilience.OpenTimeout,
+	}, cfg.APIs.Grobid.RateLimit.RequestsPerSecond, cfg.APIs.Grobid.RateLimit.Burst, nil))
 
 	embedder := embedding.NewGenerator(llmClient, qdrantClient)
 

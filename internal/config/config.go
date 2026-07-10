@@ -102,33 +102,47 @@ type RateLimitConfig struct {
 	Burst             int     `koanf:"burst"`
 }
 
+type ResilienceConfig struct {
+	MaxRetries       int           `koanf:"max_retries"`
+	BaseBackoff      time.Duration `koanf:"base_backoff"`
+	MaxBackoff       time.Duration `koanf:"max_backoff"`
+	FailureThreshold int           `koanf:"failure_threshold"`
+	OpenTimeout      time.Duration `koanf:"open_timeout"`
+}
+
 type SemanticScholarConfig struct {
-	APIKey    string          `koanf:"api_key"`
-	BaseURL   string          `koanf:"base_url"`
-	RateLimit RateLimitConfig `koanf:"rate_limit"`
-	Timeout   time.Duration   `koanf:"timeout"`
+	APIKey     string           `koanf:"api_key"`
+	BaseURL    string           `koanf:"base_url"`
+	RateLimit  RateLimitConfig  `koanf:"rate_limit"`
+	Resilience ResilienceConfig `koanf:"resilience"`
+	Timeout    time.Duration    `koanf:"timeout"`
 }
 
 type ArXivConfig struct {
-	BaseURL   string          `koanf:"base_url"`
-	RateLimit RateLimitConfig `koanf:"rate_limit"`
-	Timeout   time.Duration   `koanf:"timeout"`
+	BaseURL    string           `koanf:"base_url"`
+	RateLimit  RateLimitConfig  `koanf:"rate_limit"`
+	Resilience ResilienceConfig `koanf:"resilience"`
+	Timeout    time.Duration    `koanf:"timeout"`
 }
 
 type GrobidConfig struct {
-	BaseURL string        `koanf:"base_url"`
-	Timeout time.Duration `koanf:"timeout"`
+	BaseURL    string           `koanf:"base_url"`
+	RateLimit  RateLimitConfig  `koanf:"rate_limit"`
+	Resilience ResilienceConfig `koanf:"resilience"`
+	Timeout    time.Duration    `koanf:"timeout"`
 }
 
 type PipelineConfig struct {
-	MaxPapers            int           `koanf:"max_papers"`
-	MinPapersForAnalysis int           `koanf:"min_papers_for_analysis"`
-	PapersToAnalyze      int           `koanf:"papers_to_analyze"`
-	AnalysisDelay        time.Duration `koanf:"analysis_delay"`
-	WorkerPoolSize       int           `koanf:"worker_pool_size"`
-	JobTimeout           time.Duration `koanf:"job_timeout"`
-	PDFDownloadTimeout   time.Duration `koanf:"pdf_download_timeout"`
-	UseRedisQueue        bool          `koanf:"use_redis_queue"`
+	MaxPapers            int              `koanf:"max_papers"`
+	MinPapersForAnalysis int              `koanf:"min_papers_for_analysis"`
+	PapersToAnalyze      int              `koanf:"papers_to_analyze"`
+	AnalysisDelay        time.Duration    `koanf:"analysis_delay"`
+	WorkerPoolSize       int              `koanf:"worker_pool_size"`
+	JobTimeout           time.Duration    `koanf:"job_timeout"`
+	PDFDownloadTimeout   time.Duration    `koanf:"pdf_download_timeout"`
+	PDFRateLimit         RateLimitConfig  `koanf:"pdf_rate_limit"`
+	PDFResilience        ResilienceConfig `koanf:"pdf_resilience"`
+	UseRedisQueue        bool             `koanf:"use_redis_queue"`
 }
 
 type CacheConfig struct {

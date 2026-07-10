@@ -106,6 +106,7 @@ func (s SemanticScholarConfig) Validate() error {
 		validation.Field(&s.BaseURL, validation.Required, is.URL),
 		validation.Field(&s.RateLimit, validation.Required),
 		validation.Field(&s.Timeout, validation.Required),
+		validation.Field(&s.Resilience, validation.Required),
 	)
 }
 
@@ -114,6 +115,7 @@ func (a ArXivConfig) Validate() error {
 		validation.Field(&a.BaseURL, validation.Required, is.URL),
 		validation.Field(&a.RateLimit, validation.Required),
 		validation.Field(&a.Timeout, validation.Required),
+		validation.Field(&a.Resilience, validation.Required),
 	)
 }
 
@@ -121,6 +123,18 @@ func (g GrobidConfig) Validate() error {
 	return validation.ValidateStruct(&g,
 		validation.Field(&g.BaseURL, validation.Required),
 		validation.Field(&g.Timeout, validation.Required),
+		validation.Field(&g.RateLimit, validation.Required),
+		validation.Field(&g.Resilience, validation.Required),
+	)
+}
+
+func (r ResilienceConfig) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.MaxRetries, validation.Min(0)),
+		validation.Field(&r.BaseBackoff, validation.Required),
+		validation.Field(&r.MaxBackoff, validation.Required),
+		validation.Field(&r.FailureThreshold, validation.Min(1)),
+		validation.Field(&r.OpenTimeout, validation.Required),
 	)
 }
 

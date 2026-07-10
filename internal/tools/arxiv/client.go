@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/paper-scout/internal/circuitbreaker"
 	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/httpresilience"
 	"github.com/paper-scout/internal/logger"
 )
 
@@ -21,44 +21,30 @@ const (
 )
 
 type Client struct {
-	httpClient     *http.Client
-	baseURL        string
-	rateLimit      *RateLimiter
-	circuitBreaker *circuitbreaker.CircuitBreaker
+	httpClient *http.Client
+	baseURL    string
+	policy     *httpresilience.Policy
 }
 
 func NewClient(cfg config.ArXivConfig) *Client {
-	cb := circuitbreaker.New("arxiv", circuitbreaker.Config{
-		FailureThreshold: 5,
-		SuccessThreshold: 2,
-		OpenTimeout:      30 * time.Second,
-		OnStateChange: func(name string, from, to circuitbreaker.State) {
-			logger.Warn().
-				Str("name", name).
-				Str("from", from.String()).
-				Str("to", to.String()).
-				Msg("Circuit breaker state changed")
-		},
-	})
-
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
-		baseURL:        cfg.BaseURL,
-		rateLimit:      NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst),
-		circuitBreaker: cb,
+		baseURL: cfg.BaseURL,
+		policy: httpresilience.New("arxiv", httpresilience.Config{
+			MaxRetries: cfg.Resilience.MaxRetries, BaseBackoff: cfg.Resilience.BaseBackoff,
+			MaxBackoff: cfg.Resilience.MaxBackoff, FailureThreshold: cfg.Resilience.FailureThreshold,
+			OpenTimeout: cfg.Resilience.OpenTimeout,
+		}, cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, nil),
 	}
 }
 
 func (c *Client) Search(ctx context.Context, query string, maxResults int) (*Feed, error) {
 	var feed *Feed
+	start := time.Now()
 
-	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
-		if err := c.rateLimit.Wait(ctx); err != nil {
-			return fmt.Errorf("rate limit wait failed: %w", err)
-		}
-
+	resp, err := c.policy.Do(ctx, "search", func(ctx context.Context) (*http.Response, error) {
 		params := url.Values{}
 		params.Set("search_query", query)
 		params.Set("start", "0")
@@ -70,43 +56,34 @@ func (c *Client) Search(ctx context.Context, query string, maxResults int) (*Fee
 
 		req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
+			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		req.Header.Set("Accept", "application/xml")
 
-		start := time.Now()
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("request failed: %w", err)
-		}
-		defer resp.Body.Close()
-
-		logger.Debug().
-			Str("query", query).
-			Int("status", resp.StatusCode).
-			Dur("duration", time.Since(start)).
-			Msg("arXiv API call")
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if resp.StatusCode >= 400 {
-			return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
-		}
-
-		var f Feed
-		if err := xml.Unmarshal(body, &f); err != nil {
-			return fmt.Errorf("failed to parse XML: %w", err)
-		}
-
-		feed = &f
-		return nil
+		return c.httpClient.Do(req)
 	})
-
-	return feed, err
+	if err != nil && resp == nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("request returned no response")
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read response: %w", readErr)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+	logger.Debug().Str("query", query).Int("status", resp.StatusCode).Dur("duration", time.Since(start)).Msg("arXiv API call")
+	var f Feed
+	if err := xml.Unmarshal(body, &f); err != nil {
+		return nil, fmt.Errorf("failed to parse XML: %w", err)
+	}
+	feed = &f
+	return feed, nil
 }
 
 func (c *Client) GetByID(ctx context.Context, arxivID string) (*Entry, error) {
