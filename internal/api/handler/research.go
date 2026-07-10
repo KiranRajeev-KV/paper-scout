@@ -268,7 +268,7 @@ func (h *Handler) GetReport(c *gin.Context) {
 
 	c.Header("Content-Type", "text/markdown")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=research-report-%s.md", topicID))
-	c.String(http.StatusOK, h.generateMarkdown(report))
+	c.String(http.StatusOK, agent.FormatMarkdown(report))
 }
 
 func (h *Handler) GetBibTeX(c *gin.Context) {
@@ -287,39 +287,4 @@ func (h *Handler) GetBibTeX(c *gin.Context) {
 	c.Header("Content-Type", "text/plain")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=references-%s.bib", topicID))
 	c.String(http.StatusOK, report.BibTeX)
-}
-
-func (h *Handler) generateMarkdown(report *agent.Report) string {
-	var md string
-
-	md += "# Research Report\n\n"
-	md += fmt.Sprintf("**Topic:** %s\n\n", report.Topic)
-	md += fmt.Sprintf("*Generated: %s*\n\n---\n\n", report.GeneratedAt.Format("January 2, 2006"))
-
-	md += report.ExecutiveSummary
-	md += "\n\n"
-	md += report.LiteratureReview
-
-	if len(report.Gaps) > 0 {
-		md += "\n\n## Research Gaps\n\n"
-		for i, gap := range report.Gaps {
-			md += fmt.Sprintf("### %d. %s\n", i+1, gap.Title)
-			md += fmt.Sprintf("**Type:** %s\n\n", gap.Type)
-			md += fmt.Sprintf("%s\n\n", gap.Description)
-		}
-	}
-
-	if len(report.Directions) > 0 {
-		md += "\n\n## Research Directions\n\n"
-		for i, dir := range report.Directions {
-			md += fmt.Sprintf("### %d. %s\n", i+1, dir.Title)
-			md += fmt.Sprintf("**Difficulty:** %s | **Score:** %.1f\n\n", dir.Difficulty, dir.FeasibilityScore)
-			md += fmt.Sprintf("%s\n\n", dir.Description)
-		}
-	}
-
-	md += "\n\n## References\n\n"
-	md += "```bibtex\n" + report.BibTeX + "\n```\n"
-
-	return md
 }

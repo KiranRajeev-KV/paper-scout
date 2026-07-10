@@ -250,6 +250,11 @@ func (r *ReportGenerator) generateBibTeX(papers []*postgres.GetPapersByTopicForA
 }
 
 func (r *ReportGenerator) GenerateMarkdown(report *Report) string {
+	return FormatMarkdown(report)
+}
+
+// FormatMarkdown renders the canonical human-readable research report.
+func FormatMarkdown(report *Report) string {
 	var b strings.Builder
 
 	b.WriteString(report.ExecutiveSummary)

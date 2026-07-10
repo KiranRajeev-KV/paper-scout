@@ -56,3 +56,31 @@ func TestReportIncludesAuthorsAndIndustryViability(t *testing.T) {
 		t.Fatalf("markdown omitted industry viability: %s", markdown)
 	}
 }
+
+func TestReportMarkdownFormatterIsCanonical(t *testing.T) {
+	generator := &ReportGenerator{}
+	report := &Report{
+		Topic:            "time-series forecasting",
+		ExecutiveSummary: "Summary",
+		LiteratureReview: "Review",
+		Gaps: []GapSummary{{
+			Type:        "limitation",
+			Title:       "Missing evaluation",
+			Description: "The evaluation is narrow.",
+			Evidence:    "Paper A",
+		}},
+		Directions: []DirectionSummary{{
+			Title:             "Broader evaluation",
+			Difficulty:        "medium",
+			EstimatedCost:     "moderate",
+			IndustryViability: "High",
+			TimeToMVP:         "3 months",
+			Description:       "Evaluate across more datasets.",
+		}},
+		BibTeX: "@article{paper}",
+	}
+
+	if got, want := generator.GenerateMarkdown(report), FormatMarkdown(report); got != want {
+		t.Fatalf("method formatter differs from canonical formatter\n got: %s\nwant: %s", got, want)
+	}
+}
