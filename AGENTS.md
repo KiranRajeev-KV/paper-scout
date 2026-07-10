@@ -191,6 +191,8 @@ Even then, document what you assumed.
 - Heavy PDF processing doesn't block
 - Resumable on failure via job queue
 
+Pipeline recovery is checkpointed in Postgres: each run has a durable run ID and each completed stage stores its serialized output. Redis retains the live execution snapshot and worker leases; recovery dispatches from the first incomplete stage.
+
 ### 3. Vector Database: Qdrant
 
 **Decision:** Qdrant running in Docker container.
@@ -364,6 +366,12 @@ Even then, document what you assumed.
 **Rationale:** A paper identified by `(source, external_id)` can be discovered for multiple research topics. Topic-specific discovery source, relevance score, and analysis must therefore live on the membership row, while embeddings and PDF processing state remain global paper properties.
 
 **Migration:** `002_topic_paper_membership` backfills one membership row for each existing paper before removing the legacy topic-owned columns.
+
+### 15. Pipeline Checkpoints and Recovery
+
+**Decision:** Use Postgres as the durable workflow ledger and Redis as the live execution state.
+
+**Rationale:** Redis state alone identifies the current stage but cannot resume a stage without replaying earlier external calls. Each research topic receives a durable `run_id`; `pipeline_stage_checkpoints` stores stage status, attempts, serialized outputs, and errors. Stage writes for gaps and directions are idempotent by `(topic_id, title)`, and paper analysis resumes from incomplete `topic_papers` rows.
 
 ---
 

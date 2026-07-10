@@ -11,6 +11,7 @@ An AI-powered research analysis agent that automates academic paper discovery, a
 - **Research Gap Detection** - Identifies unexplored areas, conflicting results, and limitations across papers
 - **Feasibility Scoring** - Evaluates research directions on difficulty, cost, industry viability, and time-to-MVP
 - **Real-Time Progress** - Server-Sent Events (SSE) streaming for live pipeline status updates
+- **Crash-Safe Recovery** - Postgres stage checkpoints resume runs from the first incomplete stage without replaying completed pipeline work
 - **Multi-Format Output** - Generates Markdown reports, BibTeX references, and structured JSON
 
 ## Quick Start
