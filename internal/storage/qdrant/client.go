@@ -78,7 +78,24 @@ func (c *Client) ensureCollection(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to inspect collection %q: %w", c.collection, err)
 	}
-	return validateCollectionSchema(c.collection, info)
+	if err := validateCollectionSchema(c.collection, info); err != nil {
+		return err
+	}
+	return c.ensureTopicIDIndex(ctx)
+}
+
+func (c *Client) ensureTopicIDIndex(ctx context.Context) error {
+	wait := true
+	_, err := c.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
+		CollectionName: c.collection,
+		FieldName:      "topic_id",
+		FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
+		Wait:           &wait,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create topic_id payload index: %w", err)
+	}
+	return nil
 }
 
 func validateCollectionSchema(collection string, info *qdrant.CollectionInfo) error {

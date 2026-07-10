@@ -32,6 +32,7 @@ func (g *Generator) GenerateBatch(ctx context.Context, texts []string) ([][]floa
 }
 
 type PaperEmbedding struct {
+	ChunkID    string
 	PaperID    string
 	TopicID    string
 	ChunkType  string
@@ -41,31 +42,49 @@ type PaperEmbedding struct {
 }
 
 func (g *Generator) StoreEmbedding(ctx context.Context, emb PaperEmbedding) error {
-	pointID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(embeddingKey(emb))).String()
+	return g.StoreEmbeddings(ctx, []PaperEmbedding{emb})
+}
 
-	point := &qdrant.PointStruct{
-		Id:      qdrant.NewIDUUID(pointID),
-		Vectors: qdrant.NewVectors(emb.Vector...),
-		Payload: qdrant.NewValueMap(map[string]any{
-			"paper_id":    emb.PaperID,
-			"topic_id":    emb.TopicID,
-			"chunk_type":  emb.ChunkType,
-			"chunk_index": int64(emb.ChunkIndex),
-			"text":        emb.Text,
-		}),
+func (g *Generator) StoreEmbeddings(ctx context.Context, embeddings []PaperEmbedding) error {
+	if len(embeddings) == 0 {
+		return nil
+	}
+	points := make([]*qdrant.PointStruct, 0, len(embeddings))
+	for _, emb := range embeddings {
+		points = append(points, &qdrant.PointStruct{
+			Id:      qdrant.NewIDUUID(EmbeddingPointID(emb)),
+			Vectors: qdrant.NewVectors(emb.Vector...),
+			Payload: qdrant.NewValueMap(map[string]any{
+				"chunk_id":    emb.ChunkID,
+				"paper_id":    emb.PaperID,
+				"topic_id":    emb.TopicID,
+				"chunk_type":  emb.ChunkType,
+				"chunk_index": int64(emb.ChunkIndex),
+				"text":        emb.Text,
+			}),
+		})
 	}
 
-	if err := g.qdrant.Upsert(ctx, []*qdrant.PointStruct{point}); err != nil {
+	if err := g.qdrant.Upsert(ctx, points); err != nil {
 		return fmt.Errorf("failed to store embedding: %w", err)
 	}
 
 	logger.Debug().
-		Str("paper_id", emb.PaperID).
-		Str("chunk_type", emb.ChunkType).
-		Int("chunk_index", emb.ChunkIndex).
-		Msg("Embedding stored")
+		Int("count", len(embeddings)).
+		Msg("Embeddings stored")
 
 	return nil
+}
+
+func (g *Generator) DeleteEmbedding(ctx context.Context, emb PaperEmbedding) error {
+	if err := g.qdrant.Delete(ctx, []*qdrant.PointId{qdrant.NewIDUUID(EmbeddingPointID(emb))}); err != nil {
+		return fmt.Errorf("failed to delete embedding: %w", err)
+	}
+	return nil
+}
+
+func EmbeddingPointID(emb PaperEmbedding) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(embeddingKey(emb))).String()
 }
 
 func embeddingKey(emb PaperEmbedding) string {
@@ -81,7 +100,20 @@ func (g *Generator) SearchSimilar(ctx context.Context, vector []float32, limit u
 			},
 		}
 	}
+	return g.search(ctx, vector, limit, filter)
+}
 
+// SearchChunks restricts retrieval to persisted full-text chunks. Abstract
+// vectors remain available to ranking through SearchSimilar.
+func (g *Generator) SearchChunks(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*SearchResult, error) {
+	filter := &qdrant.Filter{Must: []*qdrant.Condition{
+		qdrant.NewMatch("topic_id", topicID),
+		qdrant.NewMatch("chunk_type", "pdf"),
+	}}
+	return g.search(ctx, vector, limit, filter)
+}
+
+func (g *Generator) search(ctx context.Context, vector []float32, limit uint64, filter *qdrant.Filter) ([]*SearchResult, error) {
 	points, err := g.qdrant.Query(ctx, vector, limit, filter)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)

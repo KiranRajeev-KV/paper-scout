@@ -52,11 +52,53 @@ func ChunkText(text string, maxWords int, overlap int) []Chunk {
 }
 
 func ChunkByParagraphs(text string, maxWords int) []Chunk {
+	return ChunkByParagraphsWithOverlap(text, maxWords, 0)
+}
+
+// ChunkByParagraphsWithOverlap preserves paragraph boundaries whenever possible
+// and uses word chunks only for a paragraph larger than the configured limit.
+func ChunkByParagraphsWithOverlap(text string, maxWords, overlap int) []Chunk {
+	if maxWords <= 0 {
+		return nil
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	if overlap >= maxWords {
+		overlap = maxWords - 1
+	}
+
 	paragraphs := strings.Split(text, "\n\n")
 	var chunks []Chunk
-	currentChunk := ""
+	var currentParts []string
 	currentWords := 0
-	index := 0
+	pendingOverlap := ""
+
+	flush := func() {
+		if len(currentParts) == 0 {
+			return
+		}
+		chunks = append(chunks, Chunk{
+			Text:      strings.Join(currentParts, "\n\n"),
+			Index:     len(chunks),
+			WordCount: currentWords,
+		})
+		currentParts = nil
+		currentWords = 0
+	}
+	startChunk := func(nextWords int) {
+		if pendingOverlap == "" || nextWords >= maxWords {
+			pendingOverlap = ""
+			return
+		}
+		carry := trailingWords(pendingOverlap, min(overlap, maxWords-nextWords))
+		pendingOverlap = ""
+		if carry == "" {
+			return
+		}
+		currentParts = append(currentParts, carry)
+		currentWords = len(strings.Fields(carry))
+	}
 
 	for _, para := range paragraphs {
 		para = strings.TrimSpace(para)
@@ -66,31 +108,56 @@ func ChunkByParagraphs(text string, maxWords int) []Chunk {
 
 		paraWords := len(strings.Fields(para))
 
-		if currentWords+paraWords > maxWords && currentChunk != "" {
-			chunks = append(chunks, Chunk{
-				Text:      strings.TrimSpace(currentChunk),
-				Index:     index,
-				WordCount: currentWords,
-			})
-			index++
-			currentChunk = ""
-			currentWords = 0
+		if paraWords > maxWords {
+			if currentWords > 0 {
+				pendingOverlap = trailingWords(strings.Join(currentParts, "\n\n"), overlap)
+				flush()
+			}
+			if pendingOverlap != "" {
+				para = pendingOverlap + "\n\n" + para
+				pendingOverlap = ""
+			}
+			flush()
+			for _, chunk := range ChunkText(para, maxWords, overlap) {
+				chunk.Index = len(chunks)
+				chunks = append(chunks, chunk)
+			}
+			if len(chunks) > 0 {
+				pendingOverlap = trailingWords(chunks[len(chunks)-1].Text, overlap)
+			}
+			continue
 		}
 
-		if currentChunk != "" {
-			currentChunk += "\n\n"
+		if currentWords == 0 {
+			startChunk(paraWords)
 		}
-		currentChunk += para
+		if currentWords+paraWords > maxWords {
+			pendingOverlap = trailingWords(strings.Join(currentParts, "\n\n"), overlap)
+			flush()
+			startChunk(paraWords)
+		}
+		currentParts = append(currentParts, para)
 		currentWords += paraWords
 	}
 
-	if currentChunk != "" {
-		chunks = append(chunks, Chunk{
-			Text:      strings.TrimSpace(currentChunk),
-			Index:     index,
-			WordCount: currentWords,
-		})
-	}
-
+	flush()
 	return chunks
+}
+
+func trailingWords(text string, count int) string {
+	if count <= 0 {
+		return ""
+	}
+	words := strings.Fields(text)
+	if len(words) <= count {
+		return strings.Join(words, " ")
+	}
+	return strings.Join(words[len(words)-count:], " ")
+}
+
+func min(first, second int) int {
+	if first < second {
+		return first
+	}
+	return second
 }
