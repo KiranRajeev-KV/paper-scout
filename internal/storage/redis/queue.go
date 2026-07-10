@@ -38,6 +38,11 @@ type Job struct {
 	StreamID  string                 `json:"-"`
 }
 
+type FailResult struct {
+	Requeued bool
+	Terminal bool
+}
+
 type QueueOptions struct {
 	Stream       string
 	Group        string
@@ -153,9 +158,9 @@ func (q *Queue) Complete(ctx context.Context, streamID string) error {
 	return nil
 }
 
-func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) error {
+func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, error) {
 	if job.StreamID == "" {
-		return fmt.Errorf("missing stream id")
+		return FailResult{}, fmt.Errorf("missing stream id")
 	}
 
 	pipe := q.client.TxPipeline()
@@ -163,10 +168,11 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) error {
 	pipe.XDel(ctx, q.stream, job.StreamID)
 
 	job.Retries++
+	result := FailResult{Terminal: job.Retries >= job.MaxRetry}
 	if job.Retries < job.MaxRetry {
 		data, err := json.Marshal(job)
 		if err != nil {
-			return fmt.Errorf("failed to marshal retry job: %w", err)
+			return FailResult{}, fmt.Errorf("failed to marshal retry job: %w", err)
 		}
 
 		pipe.XAdd(ctx, &goredis.XAddArgs{
@@ -181,6 +187,7 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) error {
 			Int("retry", job.Retries).
 			Str("error", errMsg).
 			Msg("Job failed, requeueing")
+		result.Requeued = true
 	} else {
 		failedData, _ := json.Marshal(map[string]interface{}{
 			"job":   job,
@@ -197,10 +204,10 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) error {
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to fail job: %w", err)
+		return FailResult{}, fmt.Errorf("failed to fail job: %w", err)
 	}
 
-	return nil
+	return result, nil
 }
 
 func (q *Queue) QueueDepth(ctx context.Context) (int64, error) {

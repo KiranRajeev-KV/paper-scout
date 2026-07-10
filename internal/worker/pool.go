@@ -22,7 +22,7 @@ type Pool struct {
 	started     bool
 	mu          sync.Mutex
 	metrics     *Metrics
-	redisQueue  *redis.Queue
+	redisQueue  RedisQueue
 	useRedis    bool
 	pollTimeout time.Duration
 	consumerKey string
@@ -30,6 +30,15 @@ type Pool struct {
 
 type JobHandler func(ctx context.Context, job Job) error
 type CompletionHook func(job Job, err error, terminal bool)
+
+type RedisQueue interface {
+	EnsureGroup(ctx context.Context) error
+	Enqueue(ctx context.Context, job redis.Job) error
+	Dequeue(ctx context.Context, consumer string, timeout time.Duration) (*redis.Job, error)
+	Complete(ctx context.Context, streamID string) error
+	Fail(ctx context.Context, job redis.Job, errMsg string) (redis.FailResult, error)
+	QueueDepth(ctx context.Context) (int64, error)
+}
 
 type Metrics struct {
 	JobsProcessed int64
@@ -82,7 +91,7 @@ func NewPool(workers int, queueSize int) *Pool {
 	}
 }
 
-func NewRedisPool(workers int, queue *redis.Queue) *Pool {
+func NewRedisPool(workers int, queue RedisQueue) *Pool {
 	ctx, cancel := context.WithCancel(context.Background())
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
@@ -231,12 +240,13 @@ func (p *Pool) processJobWithRedisTracking(workerID int, job Job, redisJob *redi
 			Dur("duration", duration).
 			Msg("Job failed")
 
-		terminal := !job.CanRetry()
 		failedJob := p.jobToRedisJob(job, redisJob)
-		if failErr := p.redisQueue.Fail(p.ctx, *failedJob, err.Error()); failErr != nil {
+		failure, failErr := p.redisQueue.Fail(p.ctx, *failedJob, err.Error())
+		if failErr != nil {
 			logger.Warn().Err(failErr).Msg("Failed to mark job as failed in Redis")
+			failure.Terminal = job.Retries+1 >= job.MaxRetry
 		}
-		p.notifyCompletion(job, err, terminal)
+		p.notifyCompletion(job, err, failure.Terminal)
 		return err
 	}
 
