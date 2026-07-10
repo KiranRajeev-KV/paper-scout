@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
@@ -147,8 +148,8 @@ func (g *GapDetector) storeGap(ctx context.Context, topicID string, gap Research
 func resolveGapReferences(items []gapDetectionItem, papers []*postgres.GetPapersByTopicForAnalysisRow) ([]ResearchGap, error) {
 	gaps := make([]ResearchGap, 0, len(items))
 	for itemIndex, item := range items {
-		if strings.TrimSpace(item.Title) == "" {
-			continue
+		if err := validateGapItem(item, itemIndex); err != nil {
+			return nil, err
 		}
 
 		evidenceIDs, err := resolvePaperIndices(item.EvidenceIndices, papers, fmt.Sprintf("gap %d evidence", itemIndex+1))
@@ -160,12 +161,8 @@ func resolveGapReferences(items []gapDetectionItem, papers []*postgres.GetPapers
 			return nil, err
 		}
 
-		gapType := item.GapType
-		if gapType == "" {
-			gapType = "unexplored"
-		}
 		gaps = append(gaps, ResearchGap{
-			GapType:       gapType,
+			GapType:       item.GapType,
 			Title:         truncateText(item.Title, 60),
 			Description:   truncateText(item.Description, 100),
 			Evidence:      strings.Join(evidenceIDs, ","),
@@ -173,6 +170,31 @@ func resolveGapReferences(items []gapDetectionItem, papers []*postgres.GetPapers
 		})
 	}
 	return gaps, nil
+}
+
+func validateGapItem(item gapDetectionItem, itemIndex int) error {
+	prefix := fmt.Sprintf("gap %d", itemIndex+1)
+	switch item.GapType {
+	case "unexplored", "conflicting", "limitation":
+	default:
+		return fmt.Errorf("%s has invalid gap_type %q", prefix, item.GapType)
+	}
+	if strings.TrimSpace(item.Title) == "" {
+		return fmt.Errorf("%s is missing title", prefix)
+	}
+	if utf8.RuneCountInString(item.Title) > 60 {
+		return fmt.Errorf("%s title exceeds 60 characters", prefix)
+	}
+	if strings.TrimSpace(item.Description) == "" {
+		return fmt.Errorf("%s is missing description", prefix)
+	}
+	if utf8.RuneCountInString(item.Description) > 100 {
+		return fmt.Errorf("%s description exceeds 100 characters", prefix)
+	}
+	if len(item.EvidenceIndices) == 0 {
+		return fmt.Errorf("%s is missing evidence_indices", prefix)
+	}
+	return nil
 }
 
 func resolvePaperIndices(indices []int, papers []*postgres.GetPapersByTopicForAnalysisRow, field string) ([]string, error) {

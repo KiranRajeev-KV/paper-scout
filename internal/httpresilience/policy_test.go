@@ -126,3 +126,38 @@ func TestPolicyCancellationStopsBackoff(t *testing.T) {
 		t.Fatal("policy did not stop after context cancellation")
 	}
 }
+
+func TestRateLimiterConcurrentThroughput(t *testing.T) {
+	limiter := NewTokenBucket(20, 1)
+	const callers = 5
+	start := make(chan struct{})
+	completed := make(chan time.Time, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := limiter.Wait(context.Background()); err != nil {
+				t.Errorf("Wait returned error: %v", err)
+				return
+			}
+			completed <- time.Now()
+		}()
+	}
+
+	started := time.Now()
+	close(start)
+	wg.Wait()
+	close(completed)
+	var timestamps []time.Time
+	for timestamp := range completed {
+		timestamps = append(timestamps, timestamp)
+	}
+	if len(timestamps) != callers {
+		t.Fatalf("completed calls = %d, want %d", len(timestamps), callers)
+	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond {
+		t.Fatalf("limiter allowed %d concurrent calls in %s; expected rate-limited spacing", callers, elapsed)
+	}
+}

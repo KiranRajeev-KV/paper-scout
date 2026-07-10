@@ -62,3 +62,28 @@ func TestResolveGapReferencesRejectsInvalidAndDuplicateIndices(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveGapReferencesRejectsMalformedGapFields(t *testing.T) {
+	papers := []*postgres.GetPapersByTopicForAnalysisRow{{ID: uuid.New()}}
+	base := gapDetectionItem{
+		GapType:             "limitation",
+		Title:               "Missing evaluation",
+		Description:         "The papers lack a shared baseline.",
+		EvidenceIndices:     []int{1},
+		RelatedPaperIndices: []int{1},
+	}
+	for name, mutate := range map[string]func(*gapDetectionItem){
+		"invalid type":        func(item *gapDetectionItem) { item.GapType = "other" },
+		"missing title":       func(item *gapDetectionItem) { item.Title = "" },
+		"missing description": func(item *gapDetectionItem) { item.Description = "" },
+		"missing evidence":    func(item *gapDetectionItem) { item.EvidenceIndices = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := base
+			mutate(&item)
+			if _, err := resolveGapReferences([]gapDetectionItem{item}, papers); err == nil {
+				t.Fatal("validation accepted malformed gap")
+			}
+		})
+	}
+}

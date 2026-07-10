@@ -40,3 +40,19 @@ func TestGenerateBibTeXIncludesAuthors(t *testing.T) {
 		t.Fatalf("BibTeX omitted authors: %s", bib)
 	}
 }
+
+func TestReportIncludesAuthorsAndIndustryViability(t *testing.T) {
+	generator := &ReportGenerator{bibtexGen: bibtex.NewGenerator()}
+	paper := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New(), Title: "A paper", Authors: []string{"Ada Lovelace"}}
+	bib := generator.generateBibTeX([]*postgres.GetPapersByTopicForAnalysisRow{paper})
+	markdown := generator.GenerateMarkdown(&Report{
+		Directions: []DirectionSummary{{Title: "Direction", IndustryViability: "Applicable to industrial forecasting"}},
+		BibTeX:     bib,
+	})
+	if !strings.Contains(markdown, "Ada Lovelace") {
+		t.Fatalf("markdown references omitted author: %s", markdown)
+	}
+	if !strings.Contains(markdown, "Applicable to industrial forecasting") {
+		t.Fatalf("markdown omitted industry viability: %s", markdown)
+	}
+}

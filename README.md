@@ -97,9 +97,10 @@ OUTPUT: Complete Research Report
 
 ### Reliability
 
-- **Circuit breaker** on all external APIs (Gemini, Semantic Scholar, arXiv)
-- **Token bucket** rate limiting per API
-- **Exponential backoff** with jitter for retries
+- **Shared HTTP resilience policy** across Semantic Scholar, arXiv, GROBID, and PDF downloads
+- **Circuit breaker and token-bucket rate limiting** per external service
+- **Status-aware exponential backoff** with jitter and `Retry-After` support
+- **Structured resilience events** for request, retry, throttle, and circuit-breaker observability
 - **Graceful degradation** (PDF parse failure falls back to abstracts; LLM rerank failure falls back to embedding scores)
 - **Discovery retry** with 3 query levels (full, broad, minimal)
 
@@ -115,7 +116,9 @@ Base URL: `http://localhost:8080` after starting the server with `go run ./cmd/s
 | `GET` | `/api/v1/research/:id/stream` | SSE stream for real-time updates |
 | `GET` | `/api/v1/research/:id/report` | Download Markdown report |
 | `GET` | `/api/v1/research/:id/bibtex` | Download BibTeX references |
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Readiness check for Postgres, Redis, Qdrant, and Gemini initialization |
+| `GET` | `/health/live` | Liveness check; does not contact dependencies |
+| `GET` | `/health/ready` | Readiness check for Postgres, Redis, Qdrant, and Gemini initialization |
 
 ### Start Research
 
@@ -133,6 +136,32 @@ Response:
   "message": "Research started"
 }
 ```
+
+### Get Research Result
+
+```bash
+curl http://localhost:8080/api/v1/research/{topic_id}
+```
+
+The result endpoint returns pipeline metadata together with the structured report:
+
+```json
+{
+  "topic_id": "550e8400-e29b-41d4-a716-446655440000",
+  "topic": "large language models for code generation",
+  "status": "completed",
+  "stage": "completed",
+  "progress": 1,
+  "papers": [],
+  "research_gaps": [],
+  "novel_directions": [],
+  "executive_summary": "...",
+  "literature_review": "...",
+  "bibtex": "..."
+}
+```
+
+Use `/api/v1/research/{topic_id}/status` when only pipeline status is needed.
 
 ### Stream Progress
 
@@ -167,6 +196,13 @@ All defaults are in `config/default.yaml`. Override via environment variables us
 | `LLM__EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model |
 | `LLM__REQUESTS_PER_MINUTE` | `15` | Gemini rate limit |
 | `LLM__REQUESTS_PER_DAY` | `1000` | Gemini daily limit |
+| `DATABASE__QDRANT__USE_TLS` | `false` | Use TLS for Qdrant connections; required when a Qdrant API key is configured |
+| `APIS__SEMANTIC_SCHOLAR__RESILIENCE__MAX_RETRIES` | `3` | Transient Semantic Scholar retries |
+| `APIS__ARXIV__RESILIENCE__MAX_RETRIES` | `3` | Transient arXiv retries |
+| `APIS__GROBID__RESILIENCE__MAX_RETRIES` | `2` | Transient GROBID retries |
+| `APIS__GROBID__MAX_RESPONSE_BYTES` | `16777216` | Maximum GROBID XML response size |
+| `PIPELINE__PDF_RESILIENCE__MAX_RETRIES` | `2` | Transient PDF download retries |
+| `PIPELINE__PDF_MAX_BYTES` | `52428800` | Maximum PDF download size |
 | `PIPELINE__MAX_PAPERS` | `50` | Max papers to discover |
 | `PIPELINE__PAPERS_TO_ANALYZE` | `20` | Papers for deep analysis |
 | `PIPELINE__WORKER_POOL_SIZE` | `10` | Concurrent workers |
@@ -205,6 +241,20 @@ just down           # Stop services
 just clean          # Stop and remove volumes
 just logs           # Tail app logs
 ```
+
+### Integration Tests
+
+Routine tests are hermetic. PostgreSQL and Redis integration tests are enabled only
+when disposable service endpoints are supplied:
+
+```bash
+PAPER_SCOUT_TEST_POSTGRES_DSN='postgres://research:research123@localhost:5432/research_agent?sslmode=disable' \
+PAPER_SCOUT_TEST_REDIS_ADDR='localhost:6379' \
+go test ./internal/storage/postgres ./internal/storage/redis
+```
+
+Use an isolated database and Redis instance: these tests create and remove test
+records and streams.
 
 ## Project Structure
 
