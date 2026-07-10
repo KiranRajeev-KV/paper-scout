@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/paper-scout/internal/logger"
 	"google.golang.org/genai"
@@ -55,59 +57,79 @@ func (s *StructuredOutput) buildSchema(v interface{}) (*genai.Schema, error) {
 }
 
 func inferSchema(v interface{}) (*genai.Schema, error) {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		props := make(map[string]*genai.Schema)
-		for key, val := range t {
-			propSchema, err := inferSchema(val)
+	return inferSchemaValue(reflect.ValueOf(v))
+}
+
+func inferSchemaValue(value reflect.Value) (*genai.Schema, error) {
+	if !value.IsValid() {
+		return &genai.Schema{Type: genai.TypeString}, nil
+	}
+
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return &genai.Schema{Type: genai.TypeString}, nil
+		}
+		value = value.Elem()
+	}
+
+	switch value.Kind() {
+	case reflect.String:
+		return &genai.Schema{Type: genai.TypeString}, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return &genai.Schema{Type: genai.TypeInteger}, nil
+	case reflect.Float32, reflect.Float64:
+		return &genai.Schema{Type: genai.TypeNumber}, nil
+	case reflect.Bool:
+		return &genai.Schema{Type: genai.TypeBoolean}, nil
+	case reflect.Slice, reflect.Array:
+		itemSchema := &genai.Schema{Type: genai.TypeString}
+		if value.Len() > 0 {
+			var err error
+			itemSchema, err = inferSchemaValue(value.Index(0))
 			if err != nil {
 				return nil, err
 			}
-			props[key] = propSchema
 		}
-		return &genai.Schema{
-			Type:       genai.TypeObject,
-			Properties: props,
-		}, nil
-
-	case string:
-		return &genai.Schema{Type: genai.TypeString}, nil
-
-	case int, int32, int64:
-		return &genai.Schema{Type: genai.TypeInteger}, nil
-
-	case float32, float64:
-		return &genai.Schema{Type: genai.TypeNumber}, nil
-
-	case bool:
-		return &genai.Schema{Type: genai.TypeBoolean}, nil
-
-	case []string:
-		return &genai.Schema{
-			Type: genai.TypeArray,
-			Items: &genai.Schema{
-				Type: genai.TypeString,
-			},
-		}, nil
-
-	case []interface{}:
-		if len(t) == 0 {
-			return &genai.Schema{
-				Type: genai.TypeArray,
-				Items: &genai.Schema{
-					Type: genai.TypeString,
-				},
-			}, nil
+		return &genai.Schema{Type: genai.TypeArray, Items: itemSchema}, nil
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("schema maps must have string keys, got %s", value.Type().Key())
 		}
-		itemSchema, err := inferSchema(t[0])
-		if err != nil {
-			return nil, err
+		props := make(map[string]*genai.Schema, value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			propSchema, err := inferSchemaValue(iter.Value())
+			if err != nil {
+				return nil, err
+			}
+			props[iter.Key().String()] = propSchema
 		}
-		return &genai.Schema{
-			Type:  genai.TypeArray,
-			Items: itemSchema,
-		}, nil
-
+		return &genai.Schema{Type: genai.TypeObject, Properties: props}, nil
+	case reflect.Struct:
+		props := make(map[string]*genai.Schema)
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Type().Field(i)
+			if field.PkgPath != "" { // unexported
+				continue
+			}
+			name := field.Name
+			if tag := field.Tag.Get("json"); tag != "" {
+				tagName := strings.Split(tag, ",")[0]
+				if tagName == "-" {
+					continue
+				}
+				if tagName != "" {
+					name = tagName
+				}
+			}
+			propSchema, err := inferSchemaValue(value.Field(i))
+			if err != nil {
+				return nil, err
+			}
+			props[name] = propSchema
+		}
+		return &genai.Schema{Type: genai.TypeObject, Properties: props}, nil
 	default:
 		return &genai.Schema{Type: genai.TypeString}, nil
 	}
