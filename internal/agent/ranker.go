@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -315,31 +316,21 @@ Example:
 
 Respond with JSON only:`, topic, paperList.String())
 
-	schema := map[string]interface{}{
-		"scores": []map[string]interface{}{
-			{
-				"index":  0,
-				"score":  0.0,
-				"reason": "",
-			},
-		},
-	}
-
-	result, err := r.structured.Generate(ctx, prompt, schema)
+	var response rerankResponse
+	err := r.structured.GenerateInto(ctx, prompt, rerankResponse{
+		Scores: []scoreEntry{{Index: 1, Score: 0.5, Reason: "reason"}},
+	}, &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate rerank scores: %w", err)
 	}
 
-	scores, err := parseRerankResponse(result)
-	if err != nil {
+	if err := validateRerankScores(response.Scores, len(papers)); err != nil {
 		return nil, fmt.Errorf("failed to parse rerank response: %w", err)
 	}
 
 	scoreMap := make(map[int]float64)
-	for _, s := range scores {
-		if s.Index >= 1 && s.Index <= len(papers) {
-			scoreMap[s.Index-1] = s.Score
-		}
+	for _, s := range response.Scores {
+		scoreMap[s.Index-1] = s.Score
 	}
 
 	resultPapers := make([]paperWithScore, len(papers))
@@ -386,6 +377,10 @@ type scoreEntry struct {
 	Reason string  `json:"reason"`
 }
 
+type rerankResponse struct {
+	Scores []scoreEntry `json:"scores"`
+}
+
 func parseRerankResponse(result string) ([]scoreEntry, error) {
 	cleaned := strings.TrimSpace(result)
 	cleaned = strings.TrimPrefix(cleaned, "```json")
@@ -393,31 +388,38 @@ func parseRerankResponse(result string) ([]scoreEntry, error) {
 	cleaned = strings.TrimSuffix(cleaned, "```")
 	cleaned = strings.TrimSpace(cleaned)
 
-	var response struct {
-		Scores []scoreEntry `json:"scores"`
-	}
+	var response rerankResponse
 
 	if err := json.Unmarshal([]byte(cleaned), &response); err != nil {
 		return nil, fmt.Errorf("failed to parse: %w", err)
 	}
 
-	if len(response.Scores) == 0 {
-		return nil, fmt.Errorf("no scores in response")
-	}
-
-	seen := make(map[int]struct{}, len(response.Scores))
-	for _, score := range response.Scores {
-		if score.Index < 1 {
-			return nil, fmt.Errorf("score index must be positive: %d", score.Index)
-		}
-		if score.Score < 0 || score.Score > 1 {
-			return nil, fmt.Errorf("score for index %d is outside [0,1]: %g", score.Index, score.Score)
-		}
-		if _, ok := seen[score.Index]; ok {
-			return nil, fmt.Errorf("duplicate score index: %d", score.Index)
-		}
-		seen[score.Index] = struct{}{}
+	if err := validateRerankScores(response.Scores, 0); err != nil {
+		return nil, err
 	}
 
 	return response.Scores, nil
+}
+
+func validateRerankScores(scores []scoreEntry, paperCount int) error {
+	if len(scores) == 0 {
+		return fmt.Errorf("no scores in response")
+	}
+	seen := make(map[int]struct{}, len(scores))
+	for _, score := range scores {
+		if score.Index < 1 || (paperCount > 0 && score.Index > paperCount) {
+			return fmt.Errorf("score index out of range: %d", score.Index)
+		}
+		if math.IsNaN(score.Score) || math.IsInf(score.Score, 0) || score.Score < 0 || score.Score > 1 {
+			return fmt.Errorf("score for index %d is outside [0,1]: %g", score.Index, score.Score)
+		}
+		if _, ok := seen[score.Index]; ok {
+			return fmt.Errorf("duplicate score index: %d", score.Index)
+		}
+		seen[score.Index] = struct{}{}
+	}
+	if paperCount > 0 && len(seen) != paperCount {
+		return fmt.Errorf("expected one score for each of %d papers, got %d", paperCount, len(seen))
+	}
+	return nil
 }

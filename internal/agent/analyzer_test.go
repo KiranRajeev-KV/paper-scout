@@ -115,6 +115,46 @@ func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
 	}
 }
 
+func TestMultipleAnalysisBatches(t *testing.T) {
+	pool := worker.NewPool(2, 8)
+	analyzer := NewAnalyzer(nil, nil, nil, nil, pool)
+	analyzer.analyzeFn = func(context.Context, string, string, string) (*PaperAnalysis, error) {
+		time.Sleep(5 * time.Millisecond)
+		return &PaperAnalysis{ProblemStatement: "ok"}, nil
+	}
+	analyzer.storeFn = func(context.Context, string, string, *PaperAnalysis) error { return nil }
+	pool.SetHandler(analyzer.HandleJob)
+	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	pool.Start()
+	defer pool.Stop()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, topicID := range []string{"topic-a", "topic-b"} {
+		wg.Add(1)
+		go func(topicID string) {
+			defer wg.Done()
+			errs <- analyzer.Analyze(context.Background(), topicID, []AnalysisPaper{
+				{ID: topicID + "-1", Abstract: "one"},
+				{ID: topicID + "-2", Abstract: "two"},
+			}, nil)
+		}(topicID)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Analyze returned error: %v", err)
+		}
+	}
+
+	analyzer.mu.Lock()
+	defer analyzer.mu.Unlock()
+	if len(analyzer.batches) != 0 || len(analyzer.jobToBatch) != 0 {
+		t.Fatalf("unfinished analysis state: batches=%d jobs=%d", len(analyzer.batches), len(analyzer.jobToBatch))
+	}
+}
+
 func TestAnalyzerHandleJobUsesPayloadMetadata(t *testing.T) {
 	analyzer := NewAnalyzer(nil, nil, nil, nil, nil)
 
@@ -289,15 +329,37 @@ func TestAnalyzerAnalyzeSyncFallsBackToAbstractWhenGrobidFails(t *testing.T) {
 }
 
 func validAnalysisResponse() string {
-	return strings.Join([]string{
-		"1. Problem: problem",
-		"2. Method: method",
-		"3. Dataset: dataset",
-		"4. Metrics: accuracy, f1",
-		"5. Finding: finding",
-		"6. Limitation: limitation",
-		"7. Future work: future work",
-	}, "\n")
+	return `{"problem_statement":"problem","methodology":"method","dataset":"dataset","evaluation_metrics":["accuracy","f1"],"key_findings":"finding","limitations":"limitation","future_work":"future work"}`
+}
+
+func TestValidatePaperAnalysisResponseRejectsMalformedOutput(t *testing.T) {
+	valid := func() paperAnalysisResponse {
+		return paperAnalysisResponse{
+			ProblemStatement:  stringPtr("problem"),
+			Methodology:       stringPtr("method"),
+			Dataset:           stringPtr("dataset"),
+			EvaluationMetrics: &[]string{"accuracy"},
+			KeyFindings:       stringPtr("finding"),
+			Limitations:       stringPtr("limitation"),
+			FutureWork:        stringPtr("future"),
+		}
+	}
+
+	for name, mutate := range map[string]func(*paperAnalysisResponse){
+		"missing required field": func(response *paperAnalysisResponse) { response.Methodology = nil },
+		"empty required field":   func(response *paperAnalysisResponse) { response.Methodology = stringPtr(" ") },
+		"missing metrics":        func(response *paperAnalysisResponse) { response.EvaluationMetrics = nil },
+		"empty metric":           func(response *paperAnalysisResponse) { response.EvaluationMetrics = &[]string{""} },
+		"oversized field":        func(response *paperAnalysisResponse) { response.Dataset = stringPtr(strings.Repeat("界", 51)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := valid()
+			mutate(&response)
+			if _, err := validatePaperAnalysisResponse(response); err == nil {
+				t.Fatal("validation accepted malformed analysis")
+			}
+		})
+	}
 }
 
 type fakeRoundTripper func(*http.Request) (*http.Response, error)

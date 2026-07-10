@@ -81,8 +81,9 @@ func pgBool(b bool) pgtype.Bool {
 }
 
 func truncateText(text string, maxChars int) string {
-	if len(text) <= maxChars {
+	runes := []rune(text)
+	if len(runes) <= maxChars {
 		return text
 	}
-	return text[:maxChars]
+	return string(runes[:maxChars])
 }

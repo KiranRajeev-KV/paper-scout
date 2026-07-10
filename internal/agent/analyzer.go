@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/paper-scout/internal/llm"
@@ -43,7 +44,6 @@ func NewAnalyzer(llmClient *llm.Client, pg *postgres.Client, dl *pdf.Downloader,
 	}
 	analyzer.analyzeFn = analyzer.analyzeSync
 	analyzer.storeFn = analyzer.storeAnalysis
-	analyzer.generateFn = analyzer.generate
 	return analyzer
 }
 
@@ -62,6 +62,16 @@ type PaperAnalysis struct {
 	KeyFindings       string   `json:"key_findings"`
 	Limitations       string   `json:"limitations"`
 	FutureWork        string   `json:"future_work"`
+}
+
+type paperAnalysisResponse struct {
+	ProblemStatement  *string   `json:"problem_statement"`
+	Methodology       *string   `json:"methodology"`
+	Dataset           *string   `json:"dataset"`
+	EvaluationMetrics *[]string `json:"evaluation_metrics"`
+	KeyFindings       *string   `json:"key_findings"`
+	Limitations       *string   `json:"limitations"`
+	FutureWork        *string   `json:"future_work"`
 }
 
 type analysisBatch struct {
@@ -243,21 +253,31 @@ func (a *Analyzer) analyzeSync(ctx context.Context, paperID, abstract, pdfURL st
 		fullText = abstract
 	}
 
-	prompt := fmt.Sprintf(`Analyze this paper. Answer with a numbered list ONLY. No JSON. No explanation.
+	prompt := fmt.Sprintf(`Analyze this paper. Return JSON only. Do not include markdown or explanations.
 
 Text: %s
 
-1. Problem (max 80 chars):
-2. Method (max 80 chars):
-3. Dataset (or "Not specified"):
-4. Metrics (comma-separated):
-5. Finding (max 80 chars):
-6. Limitation (max 80 chars):
-7. Future work (max 80 chars):
+	{"problem_statement":"max 80 chars","methodology":"max 80 chars","dataset":"Not specified","evaluation_metrics":["metric"],"key_findings":"max 80 chars","limitations":"max 80 chars","future_work":"max 80 chars"}`, truncateText(fullText, 5000))
 
-Answer with 7 lines only.`, truncateText(fullText, 5000))
-
-	result, err := a.generateFn(ctx, prompt)
+	var response paperAnalysisResponse
+	var result string
+	var err error
+	if a.generateFn != nil {
+		result, err = a.generateFn(ctx, prompt)
+		if err == nil {
+			err = json.Unmarshal([]byte(result), &response)
+		}
+	} else {
+		err = a.structured.GenerateInto(ctx, prompt, paperAnalysisResponse{
+			ProblemStatement:  stringPtr(""),
+			Methodology:       stringPtr(""),
+			Dataset:           stringPtr("Not specified"),
+			EvaluationMetrics: &[]string{"metric"},
+			KeyFindings:       stringPtr(""),
+			Limitations:       stringPtr(""),
+			FutureWork:        stringPtr(""),
+		}, &response)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze paper: %w", err)
 	}
@@ -268,57 +288,60 @@ Answer with 7 lines only.`, truncateText(fullText, 5000))
 		Str("result", truncateText(result, 500)).
 		Msg("LLM analysis result")
 
-	analysis := parseNumberedListToAnalysis(result)
-	if analysis == nil {
+	analysis, err := validatePaperAnalysisResponse(response)
+	if err != nil {
 		logger.Error().
 			Str("paper_id", paperID).
 			Int("result_len", len(result)).
 			Str("result", truncateText(result, 1000)).
 			Msg("Failed to parse LLM analysis response")
-		return nil, fmt.Errorf("failed to parse analysis: invalid format")
+		return nil, fmt.Errorf("failed to parse analysis: %w", err)
 	}
 
 	return analysis, nil
 }
 
-func parseNumberedListToAnalysis(result string) *PaperAnalysis {
-	lines := strings.Split(result, "\n")
-	if len(lines) < 7 {
-		return nil
+func validatePaperAnalysisResponse(response paperAnalysisResponse) (*PaperAnalysis, error) {
+	fields := []struct {
+		name  string
+		value *string
+		max   int
+	}{
+		{"problem_statement", response.ProblemStatement, 80},
+		{"methodology", response.Methodology, 80},
+		{"dataset", response.Dataset, 50},
+		{"key_findings", response.KeyFindings, 80},
+		{"limitations", response.Limitations, 80},
+		{"future_work", response.FutureWork, 80},
 	}
-
-	extractField := func(line string, maxLen int) string {
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) < 2 {
-			return ""
+	for _, field := range fields {
+		if field.value == nil || strings.TrimSpace(*field.value) == "" {
+			return nil, fmt.Errorf("missing required field %q", field.name)
 		}
-		value := strings.TrimSpace(parts[1])
-		if len(value) > maxLen {
-			value = value[:maxLen]
+		if utf8.RuneCountInString(*field.value) > field.max {
+			return nil, fmt.Errorf("field %q exceeds %d characters", field.name, field.max)
 		}
-		return value
 	}
-
-	analysis := &PaperAnalysis{
-		ProblemStatement: extractField(lines[0], 80),
-		Methodology:      extractField(lines[1], 80),
-		Dataset:          extractField(lines[2], 50),
-		KeyFindings:      extractField(lines[4], 80),
-		Limitations:      extractField(lines[5], 80),
-		FutureWork:       extractField(lines[6], 80),
+	if response.EvaluationMetrics == nil {
+		return nil, fmt.Errorf("missing required field %q", "evaluation_metrics")
 	}
-
-	metricsLine := extractField(lines[3], 200)
-	if metricsLine != "" && metricsLine != "Not specified" {
-		metrics := strings.Split(metricsLine, ",")
-		for i, m := range metrics {
-			metrics[i] = strings.TrimSpace(m)
+	for i, metric := range *response.EvaluationMetrics {
+		if strings.TrimSpace(metric) == "" {
+			return nil, fmt.Errorf("evaluation_metrics[%d] is empty", i)
 		}
-		analysis.EvaluationMetrics = metrics
 	}
-
-	return analysis
+	return &PaperAnalysis{
+		ProblemStatement:  strings.TrimSpace(*response.ProblemStatement),
+		Methodology:       strings.TrimSpace(*response.Methodology),
+		Dataset:           strings.TrimSpace(*response.Dataset),
+		EvaluationMetrics: *response.EvaluationMetrics,
+		KeyFindings:       strings.TrimSpace(*response.KeyFindings),
+		Limitations:       strings.TrimSpace(*response.Limitations),
+		FutureWork:        strings.TrimSpace(*response.FutureWork),
+	}, nil
 }
+
+func stringPtr(value string) *string { return &value }
 
 func (a *Analyzer) StoreAnalysis(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
 	return a.storeFn(ctx, topicID, paperID, analysis)

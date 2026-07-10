@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -119,6 +120,21 @@ func TestParseRerankResponseValidatesScores(t *testing.T) {
 	valid := `{"scores":[{"index":1,"score":0.5,"reason":"relevant"}]}`
 	if _, err := parseRerankResponse(valid); err != nil {
 		t.Fatalf("parseRerankResponse rejected valid scores: %v", err)
+	}
+}
+
+func TestValidateRerankScoresRejectsMalformedBatch(t *testing.T) {
+	for name, scores := range map[string][]scoreEntry{
+		"out of range index": {{Index: 3, Score: 0.5}},
+		"incomplete":         {{Index: 1, Score: 0.5}},
+		"nan":                {{Index: 1, Score: math.NaN()}},
+		"infinity":           {{Index: 1, Score: math.Inf(1)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateRerankScores(scores, 2); err == nil {
+				t.Fatal("validation accepted malformed score batch")
+			}
+		})
 	}
 }
 
