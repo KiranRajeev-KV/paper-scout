@@ -73,6 +73,21 @@ type PipelineRun struct {
 	Metrics      json.RawMessage    `json:"metrics"`
 }
 
+type PipelineStageCheckpoint struct {
+	ID           uuid.UUID          `json:"id"`
+	RunID        uuid.UUID          `json:"run_id"`
+	TopicID      uuid.UUID          `json:"topic_id"`
+	Stage        string             `json:"stage"`
+	Status       string             `json:"status"`
+	Output       []byte             `json:"output"`
+	Attempt      int32              `json:"attempt"`
+	StartedAt    pgtype.Timestamptz `json:"started_at"`
+	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
+	ErrorMessage pgtype.Text        `json:"error_message"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ResearchGap struct {
 	ID              uuid.UUID          `json:"id"`
 	TopicID         uuid.UUID          `json:"topic_id"`
@@ -94,6 +109,7 @@ type ResearchTopic struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	RunID           uuid.UUID          `json:"run_id"`
 }
 
 type TopicPaper struct {

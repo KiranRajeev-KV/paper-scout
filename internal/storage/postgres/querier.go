@@ -14,6 +14,7 @@ import (
 type Querier interface {
 	AddCitation(ctx context.Context, arg AddCitationParams) error
 	AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) error
+	CompletePipelineStage(ctx context.Context, arg CompletePipelineStageParams) (*PipelineStageCheckpoint, error)
 	CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error)
 	CreateAuthor(ctx context.Context, arg CreateAuthorParams) (*Author, error)
 	CreateNovelDirection(ctx context.Context, arg CreateNovelDirectionParams) (*NovelDirection, error)
@@ -23,7 +24,9 @@ type Querier interface {
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
 	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
+	FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error)
 	GetAuthorBySemanticScholarID(ctx context.Context, semanticScholarID pgtype.Text) (*Author, error)
+	GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error)
 	GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error)
 	GetNovelDirection(ctx context.Context, id uuid.UUID) (*NovelDirection, error)
 	GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UUID) ([]*NovelDirection, error)
@@ -36,11 +39,15 @@ type Querier interface {
 	GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error)
 	GetPipelineRun(ctx context.Context, id uuid.UUID) (*PipelineRun, error)
 	GetPipelineRunsByTopic(ctx context.Context, topicID uuid.UUID) ([]*PipelineRun, error)
+	GetPipelineStage(ctx context.Context, arg GetPipelineStageParams) (*PipelineStageCheckpoint, error)
+	GetPipelineStages(ctx context.Context, runID uuid.UUID) ([]*PipelineStageCheckpoint, error)
 	GetResearchGap(ctx context.Context, id uuid.UUID) (*ResearchGap, error)
 	GetResearchGapsByTopic(ctx context.Context, topicID uuid.UUID) ([]*ResearchGap, error)
 	GetResearchTopic(ctx context.Context, id uuid.UUID) (*ResearchTopic, error)
 	GetResearchTopicByStatus(ctx context.Context, status string) ([]*ResearchTopic, error)
+	ListRecoverableResearchTopics(ctx context.Context) ([]*ResearchTopic, error)
 	ListResearchTopics(ctx context.Context, arg ListResearchTopicsParams) ([]*ResearchTopic, error)
+	StartPipelineStage(ctx context.Context, arg StartPipelineStageParams) (*PipelineStageCheckpoint, error)
 	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error
 	UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePaperEmbeddingStatusParams) (*Paper, error)
 	UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFStatusParams) (*Paper, error)

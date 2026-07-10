@@ -7,6 +7,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Research topics table
 CREATE TABLE research_topics (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL DEFAULT uuid_generate_v4() UNIQUE,
     topic TEXT NOT NULL,
     expanded_queries JSONB,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
@@ -142,6 +143,28 @@ CREATE INDEX idx_directions_topic_id ON novel_directions(topic_id);
 CREATE INDEX idx_pipeline_topic_id ON pipeline_runs(topic_id);
 CREATE INDEX idx_pipeline_stage ON pipeline_runs(topic_id, stage);
 
+CREATE UNIQUE INDEX idx_research_gaps_topic_title ON research_gaps(topic_id, title);
+CREATE UNIQUE INDEX idx_novel_directions_topic_title ON novel_directions(topic_id, title);
+
+CREATE TABLE pipeline_stage_checkpoints (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL REFERENCES research_topics(run_id) ON DELETE CASCADE,
+    topic_id UUID NOT NULL REFERENCES research_topics(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    output JSONB,
+    attempt INT NOT NULL DEFAULT 1,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(run_id, stage)
+);
+
+CREATE INDEX idx_pipeline_stage_checkpoints_run ON pipeline_stage_checkpoints(run_id, stage);
+CREATE INDEX idx_pipeline_stage_checkpoints_topic ON pipeline_stage_checkpoints(topic_id, stage);
+
 -- Full-text search on paper abstracts
 CREATE INDEX idx_papers_abstract_fts ON papers USING gin(to_tsvector('english', abstract));
 
@@ -159,6 +182,9 @@ CREATE TRIGGER update_research_topics_updated_at BEFORE UPDATE ON research_topic
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_papers_updated_at BEFORE UPDATE ON papers
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_pipeline_stage_checkpoints_updated_at BEFORE UPDATE ON pipeline_stage_checkpoints
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_topic_papers_updated_at BEFORE UPDATE ON topic_papers

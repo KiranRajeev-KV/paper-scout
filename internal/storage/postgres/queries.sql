@@ -9,6 +9,11 @@ SELECT * FROM research_topics WHERE id = $1;
 -- name: GetResearchTopicByStatus :many
 SELECT * FROM research_topics WHERE status = $1 ORDER BY created_at DESC;
 
+-- name: ListRecoverableResearchTopics :many
+SELECT * FROM research_topics
+WHERE status NOT IN ('completed', 'failed')
+ORDER BY created_at;
+
 -- name: UpdateResearchTopicStatus :one
 UPDATE research_topics 
 SET status = $2, updated_at = NOW(), completed_at = COALESCE($3, completed_at)
@@ -143,6 +148,12 @@ WHERE c.cited_paper_id = $1;
 -- name: CreateResearchGap :one
 INSERT INTO research_gaps (topic_id, gap_type, title, description, related_paper_ids, evidence, feasibility)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (topic_id, title) DO UPDATE SET
+    gap_type = EXCLUDED.gap_type,
+    description = EXCLUDED.description,
+    related_paper_ids = EXCLUDED.related_paper_ids,
+    evidence = EXCLUDED.evidence,
+    feasibility = EXCLUDED.feasibility
 RETURNING *;
 
 -- name: GetResearchGap :one
@@ -158,6 +169,15 @@ INSERT INTO novel_directions (
     industry_viability, time_to_mvp
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (topic_id, title) DO UPDATE SET
+    gap_id = EXCLUDED.gap_id,
+    description = EXCLUDED.description,
+    rationale = EXCLUDED.rationale,
+    feasibility_score = EXCLUDED.feasibility_score,
+    implementation_complexity = EXCLUDED.implementation_complexity,
+    estimated_cost = EXCLUDED.estimated_cost,
+    industry_viability = EXCLUDED.industry_viability,
+    time_to_mvp = EXCLUDED.time_to_mvp
 RETURNING *;
 
 -- name: GetNovelDirection :one
@@ -188,6 +208,42 @@ UPDATE pipeline_runs
 SET status = $2, completed_at = $3, error_message = $4, metrics = $5
 WHERE id = $1
 RETURNING *;
+
+-- name: StartPipelineStage :one
+INSERT INTO pipeline_stage_checkpoints (run_id, topic_id, stage, status, attempt, started_at, completed_at, error_message)
+VALUES ($1, $2, $3, 'running', 1, NOW(), NULL, NULL)
+ON CONFLICT (run_id, stage) DO UPDATE SET
+    status = 'running',
+    attempt = pipeline_stage_checkpoints.attempt + 1,
+    started_at = NOW(),
+    completed_at = NULL,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: CompletePipelineStage :one
+UPDATE pipeline_stage_checkpoints
+SET status = 'completed', output = $3, completed_at = NOW(), error_message = NULL, updated_at = NOW()
+WHERE run_id = $1 AND stage = $2
+RETURNING *;
+
+-- name: FailPipelineStage :one
+UPDATE pipeline_stage_checkpoints
+SET status = 'failed', error_message = $3, updated_at = NOW()
+WHERE run_id = $1 AND stage = $2
+RETURNING *;
+
+-- name: GetPipelineStage :one
+SELECT * FROM pipeline_stage_checkpoints
+WHERE run_id = $1 AND stage = $2;
+
+-- name: GetPipelineStages :many
+SELECT * FROM pipeline_stage_checkpoints
+WHERE run_id = $1 ORDER BY started_at;
+
+-- name: GetCompletedPaperIDsByTopic :many
+SELECT paper_id FROM topic_papers
+WHERE topic_id = $1 AND analysis_status = 'completed';
 
 -- name: DeleteResearchTopic :exec
 DELETE FROM research_topics WHERE id = $1;

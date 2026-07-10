@@ -46,6 +46,39 @@ func (q *Queries) AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) 
 	return err
 }
 
+const completePipelineStage = `-- name: CompletePipelineStage :one
+UPDATE pipeline_stage_checkpoints
+SET status = 'completed', output = $3, completed_at = NOW(), error_message = NULL, updated_at = NOW()
+WHERE run_id = $1 AND stage = $2
+RETURNING id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at
+`
+
+type CompletePipelineStageParams struct {
+	RunID  uuid.UUID `json:"run_id"`
+	Stage  string    `json:"stage"`
+	Output []byte    `json:"output"`
+}
+
+func (q *Queries) CompletePipelineStage(ctx context.Context, arg CompletePipelineStageParams) (*PipelineStageCheckpoint, error) {
+	row := q.db.QueryRow(ctx, completePipelineStage, arg.RunID, arg.Stage, arg.Output)
+	var i PipelineStageCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.RunID,
+		&i.TopicID,
+		&i.Stage,
+		&i.Status,
+		&i.Output,
+		&i.Attempt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const countPapersByTopic = `-- name: CountPapersByTopic :one
 SELECT COUNT(*) FROM topic_papers WHERE topic_id = $1
 `
@@ -90,6 +123,15 @@ INSERT INTO novel_directions (
     industry_viability, time_to_mvp
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (topic_id, title) DO UPDATE SET
+    gap_id = EXCLUDED.gap_id,
+    description = EXCLUDED.description,
+    rationale = EXCLUDED.rationale,
+    feasibility_score = EXCLUDED.feasibility_score,
+    implementation_complexity = EXCLUDED.implementation_complexity,
+    estimated_cost = EXCLUDED.estimated_cost,
+    industry_viability = EXCLUDED.industry_viability,
+    time_to_mvp = EXCLUDED.time_to_mvp
 RETURNING id, topic_id, gap_id, title, description, rationale, feasibility_score, implementation_complexity, estimated_cost, industry_viability, time_to_mvp, created_at
 `
 
@@ -220,6 +262,12 @@ func (q *Queries) CreatePipelineRun(ctx context.Context, arg CreatePipelineRunPa
 const createResearchGap = `-- name: CreateResearchGap :one
 INSERT INTO research_gaps (topic_id, gap_type, title, description, related_paper_ids, evidence, feasibility)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (topic_id, title) DO UPDATE SET
+    gap_type = EXCLUDED.gap_type,
+    description = EXCLUDED.description,
+    related_paper_ids = EXCLUDED.related_paper_ids,
+    evidence = EXCLUDED.evidence,
+    feasibility = EXCLUDED.feasibility
 RETURNING id, topic_id, gap_type, title, description, related_paper_ids, evidence, feasibility, created_at
 `
 
@@ -261,7 +309,7 @@ func (q *Queries) CreateResearchGap(ctx context.Context, arg CreateResearchGapPa
 const createResearchTopic = `-- name: CreateResearchTopic :one
 INSERT INTO research_topics (topic, expanded_queries, status, config)
 VALUES ($1, $2, $3, $4)
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
 `
 
 type CreateResearchTopicParams struct {
@@ -288,6 +336,7 @@ func (q *Queries) CreateResearchTopic(ctx context.Context, arg CreateResearchTop
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RunID,
 	)
 	return &i, err
 }
@@ -320,6 +369,39 @@ func (q *Queries) DeleteResearchTopic(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const failPipelineStage = `-- name: FailPipelineStage :one
+UPDATE pipeline_stage_checkpoints
+SET status = 'failed', error_message = $3, updated_at = NOW()
+WHERE run_id = $1 AND stage = $2
+RETURNING id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at
+`
+
+type FailPipelineStageParams struct {
+	RunID        uuid.UUID   `json:"run_id"`
+	Stage        string      `json:"stage"`
+	ErrorMessage pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error) {
+	row := q.db.QueryRow(ctx, failPipelineStage, arg.RunID, arg.Stage, arg.ErrorMessage)
+	var i PipelineStageCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.RunID,
+		&i.TopicID,
+		&i.Stage,
+		&i.Status,
+		&i.Output,
+		&i.Attempt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const getAuthorBySemanticScholarID = `-- name: GetAuthorBySemanticScholarID :one
 SELECT id, name, semantic_scholar_id, orcid, created_at FROM authors WHERE semantic_scholar_id = $1
 `
@@ -335,6 +417,31 @@ func (q *Queries) GetAuthorBySemanticScholarID(ctx context.Context, semanticScho
 		&i.CreatedAt,
 	)
 	return &i, err
+}
+
+const getCompletedPaperIDsByTopic = `-- name: GetCompletedPaperIDsByTopic :many
+SELECT paper_id FROM topic_papers
+WHERE topic_id = $1 AND analysis_status = 'completed'
+`
+
+func (q *Queries) GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, getCompletedPaperIDsByTopic, topicID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var paper_id uuid.UUID
+		if err := rows.Scan(&paper_id); err != nil {
+			return nil, err
+		}
+		items = append(items, paper_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getLatestPipelineRun = `-- name: GetLatestPipelineRun :one
@@ -752,6 +859,74 @@ func (q *Queries) GetPipelineRunsByTopic(ctx context.Context, topicID uuid.UUID)
 	return items, nil
 }
 
+const getPipelineStage = `-- name: GetPipelineStage :one
+SELECT id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at FROM pipeline_stage_checkpoints
+WHERE run_id = $1 AND stage = $2
+`
+
+type GetPipelineStageParams struct {
+	RunID uuid.UUID `json:"run_id"`
+	Stage string    `json:"stage"`
+}
+
+func (q *Queries) GetPipelineStage(ctx context.Context, arg GetPipelineStageParams) (*PipelineStageCheckpoint, error) {
+	row := q.db.QueryRow(ctx, getPipelineStage, arg.RunID, arg.Stage)
+	var i PipelineStageCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.RunID,
+		&i.TopicID,
+		&i.Stage,
+		&i.Status,
+		&i.Output,
+		&i.Attempt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
+const getPipelineStages = `-- name: GetPipelineStages :many
+SELECT id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at FROM pipeline_stage_checkpoints
+WHERE run_id = $1 ORDER BY started_at
+`
+
+func (q *Queries) GetPipelineStages(ctx context.Context, runID uuid.UUID) ([]*PipelineStageCheckpoint, error) {
+	rows, err := q.db.Query(ctx, getPipelineStages, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*PipelineStageCheckpoint{}
+	for rows.Next() {
+		var i PipelineStageCheckpoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunID,
+			&i.TopicID,
+			&i.Stage,
+			&i.Status,
+			&i.Output,
+			&i.Attempt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getResearchGap = `-- name: GetResearchGap :one
 SELECT id, topic_id, gap_type, title, description, related_paper_ids, evidence, feasibility, created_at FROM research_gaps WHERE id = $1
 `
@@ -808,7 +983,7 @@ func (q *Queries) GetResearchGapsByTopic(ctx context.Context, topicID uuid.UUID)
 }
 
 const getResearchTopic = `-- name: GetResearchTopic :one
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at FROM research_topics WHERE id = $1
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics WHERE id = $1
 `
 
 func (q *Queries) GetResearchTopic(ctx context.Context, id uuid.UUID) (*ResearchTopic, error) {
@@ -823,12 +998,13 @@ func (q *Queries) GetResearchTopic(ctx context.Context, id uuid.UUID) (*Research
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RunID,
 	)
 	return &i, err
 }
 
 const getResearchTopicByStatus = `-- name: GetResearchTopicByStatus :many
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at FROM research_topics WHERE status = $1 ORDER BY created_at DESC
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics WHERE status = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) ([]*ResearchTopic, error) {
@@ -849,6 +1025,43 @@ func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) (
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
+			&i.RunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecoverableResearchTopics = `-- name: ListRecoverableResearchTopics :many
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics
+WHERE status NOT IN ('completed', 'failed')
+ORDER BY created_at
+`
+
+func (q *Queries) ListRecoverableResearchTopics(ctx context.Context) ([]*ResearchTopic, error) {
+	rows, err := q.db.Query(ctx, listRecoverableResearchTopics)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ResearchTopic{}
+	for rows.Next() {
+		var i ResearchTopic
+		if err := rows.Scan(
+			&i.ID,
+			&i.Topic,
+			&i.ExpandedQueries,
+			&i.Status,
+			&i.Config,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.RunID,
 		); err != nil {
 			return nil, err
 		}
@@ -861,7 +1074,7 @@ func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) (
 }
 
 const listResearchTopics = `-- name: ListResearchTopics :many
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at FROM research_topics ORDER BY created_at DESC LIMIT $1 OFFSET $2
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics ORDER BY created_at DESC LIMIT $1 OFFSET $2
 `
 
 type ListResearchTopicsParams struct {
@@ -887,6 +1100,7 @@ func (q *Queries) ListResearchTopics(ctx context.Context, arg ListResearchTopics
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
+			&i.RunID,
 		); err != nil {
 			return nil, err
 		}
@@ -896,6 +1110,45 @@ func (q *Queries) ListResearchTopics(ctx context.Context, arg ListResearchTopics
 		return nil, err
 	}
 	return items, nil
+}
+
+const startPipelineStage = `-- name: StartPipelineStage :one
+INSERT INTO pipeline_stage_checkpoints (run_id, topic_id, stage, status, attempt, started_at, completed_at, error_message)
+VALUES ($1, $2, $3, 'running', 1, NOW(), NULL, NULL)
+ON CONFLICT (run_id, stage) DO UPDATE SET
+    status = 'running',
+    attempt = pipeline_stage_checkpoints.attempt + 1,
+    started_at = NOW(),
+    completed_at = NULL,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at
+`
+
+type StartPipelineStageParams struct {
+	RunID   uuid.UUID `json:"run_id"`
+	TopicID uuid.UUID `json:"topic_id"`
+	Stage   string    `json:"stage"`
+}
+
+func (q *Queries) StartPipelineStage(ctx context.Context, arg StartPipelineStageParams) (*PipelineStageCheckpoint, error) {
+	row := q.db.QueryRow(ctx, startPipelineStage, arg.RunID, arg.TopicID, arg.Stage)
+	var i PipelineStageCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.RunID,
+		&i.TopicID,
+		&i.Stage,
+		&i.Status,
+		&i.Output,
+		&i.Attempt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
 }
 
 const updatePaperAnalysis = `-- name: UpdatePaperAnalysis :exec
@@ -1042,7 +1295,7 @@ const updateResearchTopicExpandedQueries = `-- name: UpdateResearchTopicExpanded
 UPDATE research_topics 
 SET expanded_queries = $2, updated_at = NOW()
 WHERE id = $1
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
 `
 
 type UpdateResearchTopicExpandedQueriesParams struct {
@@ -1062,6 +1315,7 @@ func (q *Queries) UpdateResearchTopicExpandedQueries(ctx context.Context, arg Up
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RunID,
 	)
 	return &i, err
 }
@@ -1070,7 +1324,7 @@ const updateResearchTopicStatus = `-- name: UpdateResearchTopicStatus :one
 UPDATE research_topics 
 SET status = $2, updated_at = NOW(), completed_at = COALESCE($3, completed_at)
 WHERE id = $1
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
 `
 
 type UpdateResearchTopicStatusParams struct {
@@ -1091,6 +1345,7 @@ func (q *Queries) UpdateResearchTopicStatus(ctx context.Context, arg UpdateResea
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.RunID,
 	)
 	return &i, err
 }
