@@ -23,6 +23,10 @@ import (
 )
 
 type Orchestrator struct {
+	appCtx    context.Context
+	appCancel context.CancelFunc
+	runs      sync.WaitGroup
+
 	config   *config.Config
 	postgres *postgres.Client
 	redis    *redis.Client
@@ -37,6 +41,7 @@ type Orchestrator struct {
 	reportGenerator *agent.ReportGenerator
 
 	workerPool *worker.Pool
+	runFn      func(context.Context, *Pipeline)
 
 	sse   *SSEManager
 	state *StateManager
@@ -73,6 +78,7 @@ const (
 )
 
 func NewOrchestrator(
+	appCtx context.Context,
 	cfg *config.Config,
 	pg *postgres.Client,
 	redisClient *redis.Client,
@@ -81,6 +87,10 @@ func NewOrchestrator(
 	ssClient *semantic_scholar.Client,
 	arxivClient *arxiv.Client,
 ) *Orchestrator {
+	if appCtx == nil {
+		appCtx = context.Background()
+	}
+	appCtx, appCancel := context.WithCancel(appCtx)
 	downloader := pdf.NewDownloader(cfg.Pipeline.PDFDownloadTimeout)
 	parser := pdf.NewGrobidClient(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout)
 
@@ -99,6 +109,8 @@ func NewOrchestrator(
 	}
 
 	o := &Orchestrator{
+		appCtx:     appCtx,
+		appCancel:  appCancel,
 		config:     cfg,
 		postgres:   pg,
 		redis:      redisClient,
@@ -121,7 +133,7 @@ func NewOrchestrator(
 	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
 	o.reportGenerator = agent.NewReportGenerator(pg)
 
-	o.recoverPipelines(context.Background())
+	o.recoverPipelines(appCtx)
 
 	return o
 }
@@ -147,18 +159,35 @@ func (o *Orchestrator) StartResearch(ctx context.Context, topic string) (*Pipeli
 	}
 
 	o.mu.Lock()
-	o.pipelines[pipeline.TopicID] = pipeline
+	o.pipelines[pipeline.TopicID] = clonePipeline(pipeline)
 	o.mu.Unlock()
 
 	o.state.Save(ctx, pipeline.TopicID, pipeline)
 
-	go o.runPipeline(pipeline)
+	o.launchPipeline(pipeline)
 
 	return pipeline, nil
 }
 
 func (o *Orchestrator) runPipeline(p *Pipeline) {
-	ctx := context.Background()
+	o.runPipelineWithContext(o.appCtx, p)
+}
+
+func (o *Orchestrator) launchPipeline(p *Pipeline) {
+	ctx, cancel := context.WithCancel(o.appCtx)
+	run := o.runPipelineWithContext
+	if o.runFn != nil {
+		run = o.runFn
+	}
+	o.runs.Add(1)
+	go func() {
+		defer o.runs.Done()
+		defer cancel()
+		run(ctx, p)
+	}()
+}
+
+func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) {
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -503,7 +532,9 @@ func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, 
 		p.Status = "processing"
 	}
 
-	o.state.Save(context.Background(), p.TopicID, p)
+	o.publishPipeline(p)
+
+	o.state.Save(o.appCtx, p.TopicID, p)
 
 	o.sse.Broadcast(statusEvent{
 		TopicID:  p.TopicID,
@@ -523,13 +554,30 @@ func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, 
 func (o *Orchestrator) GetPipeline(topicID string) (*Pipeline, error) {
 	o.mu.RLock()
 	p, exists := o.pipelines[topicID]
+	if exists {
+		p = clonePipeline(p)
+	}
 	o.mu.RUnlock()
 
 	if exists {
 		return p, nil
 	}
 
-	return o.state.Load(context.Background(), topicID)
+	return o.state.Load(o.appCtx, topicID)
+}
+
+func clonePipeline(p *Pipeline) *Pipeline {
+	if p == nil {
+		return nil
+	}
+	clone := *p
+	return &clone
+}
+
+func (o *Orchestrator) publishPipeline(p *Pipeline) {
+	o.mu.Lock()
+	o.pipelines[p.TopicID] = clonePipeline(p)
+	o.mu.Unlock()
 }
 
 func (o *Orchestrator) GetReport(ctx context.Context, topicID string) (*agent.Report, error) {
@@ -541,7 +589,28 @@ func (o *Orchestrator) GetSSEManager() *SSEManager {
 }
 
 func (o *Orchestrator) Shutdown() {
-	o.workerPool.Stop()
+	const shutdownTimeout = 30 * time.Second
+	deadline := time.Now().Add(shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	o.appCancel()
+	pipelinesDone := make(chan struct{})
+	go func() {
+		o.runs.Wait()
+		close(pipelinesDone)
+	}()
+	select {
+	case <-pipelinesDone:
+	case <-shutdownCtx.Done():
+		logger.Warn().Msg("Timed out waiting for pipelines to stop")
+	}
+
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	o.workerPool.StopAndWait(remaining)
 	logger.Info().Msg("Orchestrator shutdown complete")
 }
 
@@ -602,7 +671,7 @@ func (o *Orchestrator) recoverPipelines(ctx context.Context) {
 			o.mu.Unlock()
 			continue
 		}
-		o.pipelines[pipeline.TopicID] = pipeline
+		o.pipelines[pipeline.TopicID] = clonePipeline(pipeline)
 		o.mu.Unlock()
 
 		logger.Info().
@@ -611,7 +680,7 @@ func (o *Orchestrator) recoverPipelines(ctx context.Context) {
 			Str("status", pipeline.Status).
 			Msg("Recovering persisted pipeline")
 
-		go o.runPipeline(pipeline)
+		o.launchPipeline(pipeline)
 	}
 }
 

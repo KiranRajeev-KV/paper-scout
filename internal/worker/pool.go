@@ -369,6 +369,13 @@ func (p *Pool) submitToRedis(job Job) error {
 }
 
 func (p *Pool) Stop() {
+	p.stop()
+	p.wg.Wait()
+
+	logger.Info().Msg("Worker pool stopped")
+}
+
+func (p *Pool) stop() {
 	p.mu.Lock()
 	if !p.started {
 		p.mu.Unlock()
@@ -382,14 +389,24 @@ func (p *Pool) Stop() {
 	if !p.useRedis && p.jobQueue != nil {
 		close(p.jobQueue)
 	}
-
-	p.wg.Wait()
-
-	logger.Info().Msg("Worker pool stopped")
 }
 
 func (p *Pool) StopAndWait(timeout time.Duration) {
-	p.Stop()
+	p.stop()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		logger.Warn().Msg("Worker pool shutdown deadline reached")
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warn().Dur("timeout", timeout).Msg("Timed out waiting for worker pool")
+	}
 }
 
 func (p *Pool) GetMetrics() (processed, failed, queued int64, active int) {

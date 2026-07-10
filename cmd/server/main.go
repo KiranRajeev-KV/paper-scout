@@ -28,6 +28,8 @@ func main() {
 	}
 
 	ctx := context.Background()
+	appCtx, appCancel := context.WithCancel(ctx)
+	defer appCancel()
 
 	cfg, err := config.LoadDefault()
 	if err != nil {
@@ -76,6 +78,7 @@ func main() {
 	arxivClient := arxiv.NewClient(cfg.APIs.ArXiv)
 
 	orch := orchestrator.NewOrchestrator(
+		appCtx,
 		cfg,
 		pg,
 		redisClient,
