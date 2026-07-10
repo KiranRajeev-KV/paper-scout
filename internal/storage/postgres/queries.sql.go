@@ -309,7 +309,7 @@ func (q *Queries) CreateResearchGap(ctx context.Context, arg CreateResearchGapPa
 const createResearchTopic = `-- name: CreateResearchTopic :one
 INSERT INTO research_topics (topic, expanded_queries, status, config)
 VALUES ($1, $2, $3, $4)
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message
 `
 
 type CreateResearchTopicParams struct {
@@ -337,6 +337,9 @@ func (q *Queries) CreateResearchTopic(ctx context.Context, arg CreateResearchTop
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.RunID,
+		&i.CurrentStage,
+		&i.Progress,
+		&i.ErrorMessage,
 	)
 	return &i, err
 }
@@ -983,7 +986,7 @@ func (q *Queries) GetResearchGapsByTopic(ctx context.Context, topicID uuid.UUID)
 }
 
 const getResearchTopic = `-- name: GetResearchTopic :one
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics WHERE id = $1
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message FROM research_topics WHERE id = $1
 `
 
 func (q *Queries) GetResearchTopic(ctx context.Context, id uuid.UUID) (*ResearchTopic, error) {
@@ -999,12 +1002,15 @@ func (q *Queries) GetResearchTopic(ctx context.Context, id uuid.UUID) (*Research
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.RunID,
+		&i.CurrentStage,
+		&i.Progress,
+		&i.ErrorMessage,
 	)
 	return &i, err
 }
 
 const getResearchTopicByStatus = `-- name: GetResearchTopicByStatus :many
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics WHERE status = $1 ORDER BY created_at DESC
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message FROM research_topics WHERE status = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) ([]*ResearchTopic, error) {
@@ -1026,6 +1032,9 @@ func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) (
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.RunID,
+			&i.CurrentStage,
+			&i.Progress,
+			&i.ErrorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -1038,7 +1047,7 @@ func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) (
 }
 
 const listRecoverableResearchTopics = `-- name: ListRecoverableResearchTopics :many
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message FROM research_topics
 WHERE status NOT IN ('completed', 'failed')
 ORDER BY created_at
 `
@@ -1062,6 +1071,9 @@ func (q *Queries) ListRecoverableResearchTopics(ctx context.Context) ([]*Researc
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.RunID,
+			&i.CurrentStage,
+			&i.Progress,
+			&i.ErrorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -1074,7 +1086,7 @@ func (q *Queries) ListRecoverableResearchTopics(ctx context.Context) ([]*Researc
 }
 
 const listResearchTopics = `-- name: ListResearchTopics :many
-SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id FROM research_topics ORDER BY created_at DESC LIMIT $1 OFFSET $2
+SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message FROM research_topics ORDER BY created_at DESC LIMIT $1 OFFSET $2
 `
 
 type ListResearchTopicsParams struct {
@@ -1101,6 +1113,9 @@ func (q *Queries) ListResearchTopics(ctx context.Context, arg ListResearchTopics
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.RunID,
+			&i.CurrentStage,
+			&i.Progress,
+			&i.ErrorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -1295,7 +1310,7 @@ const updateResearchTopicExpandedQueries = `-- name: UpdateResearchTopicExpanded
 UPDATE research_topics 
 SET expanded_queries = $2, updated_at = NOW()
 WHERE id = $1
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message
 `
 
 type UpdateResearchTopicExpandedQueriesParams struct {
@@ -1316,6 +1331,58 @@ func (q *Queries) UpdateResearchTopicExpandedQueries(ctx context.Context, arg Up
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.RunID,
+		&i.CurrentStage,
+		&i.Progress,
+		&i.ErrorMessage,
+	)
+	return &i, err
+}
+
+const updateResearchTopicState = `-- name: UpdateResearchTopicState :one
+UPDATE research_topics
+SET status = $2,
+    current_stage = $3,
+    progress = $4,
+    error_message = $5,
+    updated_at = NOW(),
+    completed_at = CASE
+        WHEN $2 = 'completed' THEN COALESCE(completed_at, NOW())
+        ELSE completed_at
+    END
+WHERE id = $1
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message
+`
+
+type UpdateResearchTopicStateParams struct {
+	ID           uuid.UUID   `json:"id"`
+	Status       string      `json:"status"`
+	CurrentStage string      `json:"current_stage"`
+	Progress     float64     `json:"progress"`
+	ErrorMessage pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) UpdateResearchTopicState(ctx context.Context, arg UpdateResearchTopicStateParams) (*ResearchTopic, error) {
+	row := q.db.QueryRow(ctx, updateResearchTopicState,
+		arg.ID,
+		arg.Status,
+		arg.CurrentStage,
+		arg.Progress,
+		arg.ErrorMessage,
+	)
+	var i ResearchTopic
+	err := row.Scan(
+		&i.ID,
+		&i.Topic,
+		&i.ExpandedQueries,
+		&i.Status,
+		&i.Config,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.RunID,
+		&i.CurrentStage,
+		&i.Progress,
+		&i.ErrorMessage,
 	)
 	return &i, err
 }
@@ -1324,7 +1391,7 @@ const updateResearchTopicStatus = `-- name: UpdateResearchTopicStatus :one
 UPDATE research_topics 
 SET status = $2, updated_at = NOW(), completed_at = COALESCE($3, completed_at)
 WHERE id = $1
-RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id
+RETURNING id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message
 `
 
 type UpdateResearchTopicStatusParams struct {
@@ -1346,6 +1413,9 @@ func (q *Queries) UpdateResearchTopicStatus(ctx context.Context, arg UpdateResea
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.RunID,
+		&i.CurrentStage,
+		&i.Progress,
+		&i.ErrorMessage,
 	)
 	return &i, err
 }

@@ -192,8 +192,7 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error().Interface("panic", r).Str("topic_id", p.TopicID).Msg("Pipeline panicked")
-			o.failStage(ctx, p, p.Stage, fmt.Errorf("pipeline panic: %v", r))
-			o.updateStatus(p, StageFailed, 0, fmt.Sprintf("Pipeline panic: %v", r))
+			o.failPipeline(ctx, p, p.Stage, fmt.Errorf("pipeline panic: %v", r))
 		}
 	}()
 
@@ -372,26 +371,20 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 
 	o.updateStatus(p, StageCompleted, 1.0, "")
 
-	_, err = o.postgres.Queries().UpdateResearchTopicStatus(ctx, postgres.UpdateResearchTopicStatusParams{
-		ID:     parseUUID(p.TopicID),
-		Status: "completed",
-	})
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update topic status")
+	if err := o.persistTerminalState(ctx, p); err != nil {
+		logger.Warn().Err(err).Str("topic_id", p.TopicID).Msg("Failed to persist completed topic state")
 	}
 
 	logger.Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
 }
 
 func (o *Orchestrator) failPipeline(ctx context.Context, p *Pipeline, stage Stage, err error) {
-	o.failStage(ctx, p, stage, err)
-	if _, dbErr := o.postgres.Queries().UpdateResearchTopicStatus(ctx, postgres.UpdateResearchTopicStatusParams{
-		ID:     parseUUID(p.TopicID),
-		Status: "failed",
-	}); dbErr != nil {
-		logger.Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic status")
-	}
 	o.updateStatus(p, StageFailed, 0, err.Error())
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if dbErr := o.failStage(persistCtx, p, stage, err); dbErr != nil {
+		logger.Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic state")
+	}
 }
 
 func (o *Orchestrator) pendingRankedPapers(ctx context.Context, topicID string, ranked []agent.RankedPaper) ([]agent.RankedPaper, error) {
@@ -630,18 +623,21 @@ func (o *Orchestrator) recoverPipelines(ctx context.Context) {
 		logger.Warn().Err(err).Msg("Failed to scan durable recoverable topics")
 	} else {
 		for _, topic := range durableTopics {
-			if _, exists := recoverable[topic.ID.String()]; exists {
-				continue
-			}
-
 			pipeline := &Pipeline{
 				TopicID:   topic.ID.String(),
 				RunID:     topic.RunID.String(),
 				Topic:     topic.Topic,
 				Status:    topic.Status,
-				Stage:     StagePending,
+				Stage:     Stage(topic.CurrentStage),
+				Progress:  topic.Progress,
 				StartedAt: topic.CreatedAt.Time,
 				UpdatedAt: topic.UpdatedAt.Time,
+			}
+			if topic.ErrorMessage.Valid {
+				pipeline.Error = topic.ErrorMessage.String
+			}
+			if pipeline.Stage == "" {
+				pipeline.Stage = StagePending
 			}
 			checkpoints, checkpointErr := o.postgres.Queries().GetPipelineStages(ctx, topic.RunID)
 			if checkpointErr != nil {

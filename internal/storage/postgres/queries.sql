@@ -20,6 +20,20 @@ SET status = $2, updated_at = NOW(), completed_at = COALESCE($3, completed_at)
 WHERE id = $1
 RETURNING *;
 
+-- name: UpdateResearchTopicState :one
+UPDATE research_topics
+SET status = $2,
+    current_stage = $3,
+    progress = $4,
+    error_message = $5,
+    updated_at = NOW(),
+    completed_at = CASE
+        WHEN $2 = 'completed' THEN COALESCE(completed_at, NOW())
+        ELSE completed_at
+    END
+WHERE id = $1
+RETURNING *;
+
 -- name: UpdateResearchTopicExpandedQueries :one
 UPDATE research_topics 
 SET expanded_queries = $2, updated_at = NOW()

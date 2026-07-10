@@ -54,6 +54,7 @@ type Querier interface {
 	UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error
 	UpdatePipelineRunStatus(ctx context.Context, arg UpdatePipelineRunStatusParams) (*PipelineRun, error)
 	UpdateResearchTopicExpandedQueries(ctx context.Context, arg UpdateResearchTopicExpandedQueriesParams) (*ResearchTopic, error)
+	UpdateResearchTopicState(ctx context.Context, arg UpdateResearchTopicStateParams) (*ResearchTopic, error)
 	UpdateResearchTopicStatus(ctx context.Context, arg UpdateResearchTopicStatusParams) (*ResearchTopic, error)
 }
 

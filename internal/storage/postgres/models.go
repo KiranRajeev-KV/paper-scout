@@ -110,6 +110,9 @@ type ResearchTopic struct {
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
 	RunID           uuid.UUID          `json:"run_id"`
+	CurrentStage    string             `json:"current_stage"`
+	Progress        float64            `json:"progress"`
+	ErrorMessage    pgtype.Text        `json:"error_message"`
 }
 
 type TopicPaper struct {
