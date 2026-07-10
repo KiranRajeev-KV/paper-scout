@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	RerankBatchSize        = 10
-	RerankTopK             = 50
-	ChunkTypeAbstract      = "abstract"
-	EmbeddingStatusIndexed = "indexed"
-	EmbeddingStatusFailed  = "failed"
+	RerankBatchSize          = 10
+	RerankTopK               = 50
+	ChunkTypeAbstract        = "abstract"
+	EmbeddingStatusCompleted = "completed"
+	EmbeddingStatusFailed    = "failed"
 )
 
 type Ranker struct {
@@ -197,7 +197,7 @@ func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []
 			continue
 		}
 
-		if err := r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusIndexed); err != nil {
+		if err := r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusCompleted); err != nil {
 			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to update embedding status")
 		}
 	}

@@ -19,6 +19,7 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	ranker := &Ranker{llm: nil}
 
 	var stored []embedding.PaperEmbedding
+	var embeddingStatuses []string
 	var searchCalled bool
 	updatedScores := make(map[uuid.UUID]float64)
 
@@ -59,6 +60,7 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 		return nil
 	}
 	ranker.updateEmbeddingStatusFn = func(ctx context.Context, paperID uuid.UUID, status string) error {
+		embeddingStatuses = append(embeddingStatuses, status)
 		return nil
 	}
 
@@ -72,6 +74,14 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	}
 	if len(stored) != 2 {
 		t.Fatalf("stored %d embeddings, want 2", len(stored))
+	}
+	for _, status := range embeddingStatuses {
+		if status != EmbeddingStatusCompleted {
+			t.Fatalf("embedding status = %q, want %q", status, EmbeddingStatusCompleted)
+		}
+	}
+	if len(embeddingStatuses) != 2 {
+		t.Fatalf("updated %d embedding statuses, want 2", len(embeddingStatuses))
 	}
 	if stored[0].ChunkType != ChunkTypeAbstract || stored[1].ChunkType != ChunkTypeAbstract {
 		t.Fatalf("unexpected chunk types: %+v", stored)
