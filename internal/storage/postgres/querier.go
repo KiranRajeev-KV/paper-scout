@@ -8,7 +8,6 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -16,18 +15,17 @@ type Querier interface {
 	AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) error
 	CompletePipelineStage(ctx context.Context, arg CompletePipelineStageParams) (*PipelineStageCheckpoint, error)
 	CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error)
-	CreateAuthor(ctx context.Context, arg CreateAuthorParams) (*Author, error)
 	CreateNovelDirection(ctx context.Context, arg CreateNovelDirectionParams) (*NovelDirection, error)
-	CreatePaper(ctx context.Context, arg CreatePaperParams) error
+	CreatePaper(ctx context.Context, arg CreatePaperParams) (uuid.UUID, error)
 	CreatePipelineRun(ctx context.Context, arg CreatePipelineRunParams) (*PipelineRun, error)
 	CreateResearchGap(ctx context.Context, arg CreateResearchGapParams) (*ResearchGap, error)
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
 	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
 	FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error)
-	GetAuthorBySemanticScholarID(ctx context.Context, semanticScholarID pgtype.Text) (*Author, error)
 	GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error)
 	GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error)
+	GetNextPaperAuthorPosition(ctx context.Context, paperID uuid.UUID) (int32, error)
 	GetNovelDirection(ctx context.Context, id uuid.UUID) (*NovelDirection, error)
 	GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UUID) ([]*NovelDirection, error)
 	GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error)
@@ -56,6 +54,8 @@ type Querier interface {
 	UpdateResearchTopicExpandedQueries(ctx context.Context, arg UpdateResearchTopicExpandedQueriesParams) (*ResearchTopic, error)
 	UpdateResearchTopicState(ctx context.Context, arg UpdateResearchTopicStateParams) (*ResearchTopic, error)
 	UpdateResearchTopicStatus(ctx context.Context, arg UpdateResearchTopicStatusParams) (*ResearchTopic, error)
+	UpsertAuthorByName(ctx context.Context, name string) (*Author, error)
+	UpsertAuthorBySemanticScholarID(ctx context.Context, arg UpsertAuthorBySemanticScholarIDParams) (*Author, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -77,6 +77,14 @@ CREATE TABLE paper_authors (
     PRIMARY KEY (paper_id, author_id)
 );
 
+CREATE UNIQUE INDEX idx_authors_semantic_scholar_id
+    ON authors (semantic_scholar_id)
+    WHERE semantic_scholar_id IS NOT NULL;
+
+CREATE UNIQUE INDEX idx_authors_fallback_name
+    ON authors (lower(btrim(name)))
+    WHERE semantic_scholar_id IS NULL;
+
 -- Citations table
 CREATE TABLE citations (
     citing_paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,

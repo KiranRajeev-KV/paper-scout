@@ -90,32 +90,6 @@ func (q *Queries) CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (in
 	return count, err
 }
 
-const createAuthor = `-- name: CreateAuthor :one
-INSERT INTO authors (name, semantic_scholar_id, orcid)
-VALUES ($1, $2, $3)
-ON CONFLICT DO NOTHING
-RETURNING id, name, semantic_scholar_id, orcid, created_at
-`
-
-type CreateAuthorParams struct {
-	Name              string      `json:"name"`
-	SemanticScholarID pgtype.Text `json:"semantic_scholar_id"`
-	Orcid             pgtype.Text `json:"orcid"`
-}
-
-func (q *Queries) CreateAuthor(ctx context.Context, arg CreateAuthorParams) (*Author, error) {
-	row := q.db.QueryRow(ctx, createAuthor, arg.Name, arg.SemanticScholarID, arg.Orcid)
-	var i Author
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.SemanticScholarID,
-		&i.Orcid,
-		&i.CreatedAt,
-	)
-	return &i, err
-}
-
 const createNovelDirection = `-- name: CreateNovelDirection :one
 INSERT INTO novel_directions (
     topic_id, gap_id, title, description, rationale,
@@ -179,7 +153,7 @@ func (q *Queries) CreateNovelDirection(ctx context.Context, arg CreateNovelDirec
 	return &i, err
 }
 
-const createPaper = `-- name: CreatePaper :exec
+const createPaper = `-- name: CreatePaper :one
 WITH paper AS (
     INSERT INTO papers (
         source, external_id, source_url, title, abstract,
@@ -202,6 +176,7 @@ FROM paper
 ON CONFLICT (topic_id, paper_id) DO UPDATE SET
     discovery_source = EXCLUDED.discovery_source,
     updated_at = NOW()
+RETURNING paper_id
 `
 
 type CreatePaperParams struct {
@@ -216,8 +191,8 @@ type CreatePaperParams struct {
 	PdfUrl          pgtype.Text `json:"pdf_url"`
 }
 
-func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) error {
-	_, err := q.db.Exec(ctx, createPaper,
+func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, createPaper,
 		arg.TopicID,
 		arg.DiscoverySource,
 		arg.ExternalID,
@@ -228,7 +203,9 @@ func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) error 
 		arg.Venue,
 		arg.PdfUrl,
 	)
-	return err
+	var paper_id uuid.UUID
+	err := row.Scan(&paper_id)
+	return paper_id, err
 }
 
 const createPipelineRun = `-- name: CreatePipelineRun :one
@@ -405,23 +382,6 @@ func (q *Queries) FailPipelineStage(ctx context.Context, arg FailPipelineStagePa
 	return &i, err
 }
 
-const getAuthorBySemanticScholarID = `-- name: GetAuthorBySemanticScholarID :one
-SELECT id, name, semantic_scholar_id, orcid, created_at FROM authors WHERE semantic_scholar_id = $1
-`
-
-func (q *Queries) GetAuthorBySemanticScholarID(ctx context.Context, semanticScholarID pgtype.Text) (*Author, error) {
-	row := q.db.QueryRow(ctx, getAuthorBySemanticScholarID, semanticScholarID)
-	var i Author
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.SemanticScholarID,
-		&i.Orcid,
-		&i.CreatedAt,
-	)
-	return &i, err
-}
-
 const getCompletedPaperIDsByTopic = `-- name: GetCompletedPaperIDsByTopic :many
 SELECT paper_id FROM topic_papers
 WHERE topic_id = $1 AND analysis_status = 'completed'
@@ -468,6 +428,19 @@ func (q *Queries) GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (
 		&i.Metrics,
 	)
 	return &i, err
+}
+
+const getNextPaperAuthorPosition = `-- name: GetNextPaperAuthorPosition :one
+SELECT COALESCE(MAX(position) + 1, 0)::int
+FROM paper_authors
+WHERE paper_id = $1
+`
+
+func (q *Queries) GetNextPaperAuthorPosition(ctx context.Context, paperID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, getNextPaperAuthorPosition, paperID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const getNovelDirection = `-- name: GetNovelDirection :one
@@ -746,7 +719,16 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 }
 
 const getPapersByTopicForAnalysis = `-- name: GetPapersByTopicForAnalysis :many
-SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at, tp.analysis AS topic_analysis, tp.relevance_score AS topic_relevance_score
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at,
+       tp.analysis AS topic_analysis,
+       tp.relevance_score AS topic_relevance_score,
+       ARRAY(
+           SELECT a.name
+           FROM paper_authors pa
+           JOIN authors a ON a.id = pa.author_id
+           WHERE pa.paper_id = p.id
+           ORDER BY pa.position
+       )::text[] AS authors
 FROM papers p
 JOIN topic_papers tp ON tp.paper_id = p.id
 WHERE tp.topic_id = $1 AND tp.analysis IS NOT NULL
@@ -770,6 +752,7 @@ type GetPapersByTopicForAnalysisRow struct {
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
 	TopicAnalysis       []byte             `json:"topic_analysis"`
 	TopicRelevanceScore pgtype.Float8      `json:"topic_relevance_score"`
+	Authors             []string           `json:"authors"`
 }
 
 func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error) {
@@ -798,6 +781,7 @@ func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.
 			&i.UpdatedAt,
 			&i.TopicAnalysis,
 			&i.TopicRelevanceScore,
+			&i.Authors,
 		); err != nil {
 			return nil, err
 		}
@@ -1416,6 +1400,53 @@ func (q *Queries) UpdateResearchTopicStatus(ctx context.Context, arg UpdateResea
 		&i.CurrentStage,
 		&i.Progress,
 		&i.ErrorMessage,
+	)
+	return &i, err
+}
+
+const upsertAuthorByName = `-- name: UpsertAuthorByName :one
+INSERT INTO authors (name)
+VALUES ($1)
+ON CONFLICT (lower(btrim(name))) WHERE semantic_scholar_id IS NULL DO UPDATE SET
+    name = EXCLUDED.name
+RETURNING id, name, semantic_scholar_id, orcid, created_at
+`
+
+func (q *Queries) UpsertAuthorByName(ctx context.Context, name string) (*Author, error) {
+	row := q.db.QueryRow(ctx, upsertAuthorByName, name)
+	var i Author
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SemanticScholarID,
+		&i.Orcid,
+		&i.CreatedAt,
+	)
+	return &i, err
+}
+
+const upsertAuthorBySemanticScholarID = `-- name: UpsertAuthorBySemanticScholarID :one
+INSERT INTO authors (name, semantic_scholar_id)
+VALUES ($1, $2)
+ON CONFLICT (semantic_scholar_id) WHERE semantic_scholar_id IS NOT NULL DO UPDATE SET
+    name = EXCLUDED.name
+RETURNING id, name, semantic_scholar_id, orcid, created_at
+`
+
+type UpsertAuthorBySemanticScholarIDParams struct {
+	Name              string      `json:"name"`
+	SemanticScholarID pgtype.Text `json:"semantic_scholar_id"`
+}
+
+func (q *Queries) UpsertAuthorBySemanticScholarID(ctx context.Context, arg UpsertAuthorBySemanticScholarIDParams) (*Author, error) {
+	row := q.db.QueryRow(ctx, upsertAuthorBySemanticScholarID, arg.Name, arg.SemanticScholarID)
+	var i Author
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SemanticScholarID,
+		&i.Orcid,
+		&i.CreatedAt,
 	)
 	return &i, err
 }

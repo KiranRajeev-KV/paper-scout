@@ -43,16 +43,21 @@ RETURNING *;
 -- name: ListResearchTopics :many
 SELECT * FROM research_topics ORDER BY created_at DESC LIMIT $1 OFFSET $2;
 
--- name: CreateAuthor :one
-INSERT INTO authors (name, semantic_scholar_id, orcid)
-VALUES ($1, $2, $3)
-ON CONFLICT DO NOTHING
+-- name: UpsertAuthorBySemanticScholarID :one
+INSERT INTO authors (name, semantic_scholar_id)
+VALUES ($1, $2)
+ON CONFLICT (semantic_scholar_id) WHERE semantic_scholar_id IS NOT NULL DO UPDATE SET
+    name = EXCLUDED.name
 RETURNING *;
 
--- name: GetAuthorBySemanticScholarID :one
-SELECT * FROM authors WHERE semantic_scholar_id = $1;
+-- name: UpsertAuthorByName :one
+INSERT INTO authors (name)
+VALUES ($1)
+ON CONFLICT (lower(btrim(name))) WHERE semantic_scholar_id IS NULL DO UPDATE SET
+    name = EXCLUDED.name
+RETURNING *;
 
--- name: CreatePaper :exec
+-- name: CreatePaper :one
 WITH paper AS (
     INSERT INTO papers (
         source, external_id, source_url, title, abstract,
@@ -74,7 +79,13 @@ SELECT $1, id, $2
 FROM paper
 ON CONFLICT (topic_id, paper_id) DO UPDATE SET
     discovery_source = EXCLUDED.discovery_source,
-    updated_at = NOW();
+    updated_at = NOW()
+RETURNING paper_id;
+
+-- name: GetNextPaperAuthorPosition :one
+SELECT COALESCE(MAX(position) + 1, 0)::int
+FROM paper_authors
+WHERE paper_id = $1;
 
 -- name: GetPaper :one
 SELECT * FROM papers WHERE id = $1;
@@ -89,7 +100,16 @@ WHERE tp.topic_id = $1
 ORDER BY tp.relevance_score DESC NULLS LAST;
 
 -- name: GetPapersByTopicForAnalysis :many
-SELECT p.*, tp.analysis AS topic_analysis, tp.relevance_score AS topic_relevance_score
+SELECT p.*,
+       tp.analysis AS topic_analysis,
+       tp.relevance_score AS topic_relevance_score,
+       ARRAY(
+           SELECT a.name
+           FROM paper_authors pa
+           JOIN authors a ON a.id = pa.author_id
+           WHERE pa.paper_id = p.id
+           ORDER BY pa.position
+       )::text[] AS authors
 FROM papers p
 JOIN topic_papers tp ON tp.paper_id = p.id
 WHERE tp.topic_id = $1 AND tp.analysis IS NOT NULL
