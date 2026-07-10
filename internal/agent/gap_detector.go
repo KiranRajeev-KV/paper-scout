@@ -12,14 +12,14 @@ import (
 )
 
 type GapDetector struct {
-	llm      *llm.Client
-	postgres *postgres.Client
+	postgres   *postgres.Client
+	structured *llm.StructuredOutput
 }
 
 func NewGapDetector(llmClient *llm.Client, pg *postgres.Client) *GapDetector {
 	return &GapDetector{
-		llm:      llmClient,
-		postgres: pg,
+		postgres:   pg,
+		structured: llm.NewStructuredOutput(llmClient),
 	}
 }
 
@@ -29,6 +29,18 @@ type ResearchGap struct {
 	Description   string   `json:"description"`
 	Evidence      string   `json:"evidence"`
 	RelatedPapers []string `json:"related_paper_ids"`
+}
+
+type gapDetectionResponse struct {
+	Gaps []gapDetectionItem `json:"gaps"`
+}
+
+type gapDetectionItem struct {
+	GapType             string `json:"gap_type"`
+	Title               string `json:"title"`
+	Description         string `json:"description"`
+	EvidenceIndices     []int  `json:"evidence_indices"`
+	RelatedPaperIndices []int  `json:"related_paper_indices"`
 }
 
 func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]ResearchGap, error) {
@@ -47,48 +59,26 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 
 	logger.Info().Int("papers", len(papers)).Msg("Papers available for gap detection")
 
-	var papersSummary []string
-	for _, p := range papers {
-		var analysis PaperAnalysis
-		if p.TopicAnalysis != nil {
-			if err := json.Unmarshal(p.TopicAnalysis, &analysis); err == nil {
-				summary := fmt.Sprintf("- %s: %s (Limitations: %s)", p.ID.String()[:8], truncateText(p.Title, 50), truncateText(analysis.Limitations, 50))
-				papersSummary = append(papersSummary, summary)
-			}
-		}
-	}
+	prompt := buildGapPrompt(topic, papers)
 
-	prompt := fmt.Sprintf(`Analyze these papers. Identify 3-5 research gaps. Answer with numbered lists.
-
-Topic: %s
-
-Papers:
-%s
-
-Format for each gap:
----GAP---
-1. Type: unexplored/conflicting/limitation
-2. Title: max 60 chars
-3. Description: max 100 chars
-4. Evidence: paper IDs (comma-separated)
-5. Related: paper IDs (comma-separated)
-
-Answer with gaps only. Use ---GAP--- to separate each.`, topic, strings.Join(papersSummary, "\n"))
-
-	result, err := g.llm.Generate(ctx, prompt)
-	if err != nil {
+	var response gapDetectionResponse
+	if err := g.structured.GenerateInto(ctx, prompt, gapDetectionResponse{
+		Gaps: []gapDetectionItem{{
+			GapType:             "unexplored",
+			Title:               "",
+			Description:         "",
+			EvidenceIndices:     []int{1},
+			RelatedPaperIndices: []int{1},
+		}},
+	}, &response); err != nil {
 		return nil, fmt.Errorf("failed to detect gaps: %w", err)
 	}
 
-	logger.Debug().
-		Int("result_len", len(result)).
-		Str("result", truncateText(result, 500)).
-		Msg("LLM gap detection result")
-
-	gaps := parseGapsFromNumberedList(result)
-
+	gaps, err := resolveGapReferences(response.Gaps, papers)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gap references: %w", err)
+	}
 	if len(gaps) == 0 {
-		logger.Warn().Str("result", truncateText(result, 1000)).Msg("No gaps parsed from response")
 		return nil, fmt.Errorf("no valid gaps found in response")
 	}
 
@@ -105,6 +95,42 @@ Answer with gaps only. Use ---GAP--- to separate each.`, topic, strings.Join(pap
 	return gaps, nil
 }
 
+func buildGapPrompt(topic string, papers []*postgres.GetPapersByTopicForAnalysisRow) string {
+	papersSummary := make([]string, 0, len(papers))
+	for i, p := range papers {
+		limitations := ""
+		var analysis PaperAnalysis
+		if p.TopicAnalysis != nil {
+			if err := json.Unmarshal(p.TopicAnalysis, &analysis); err == nil {
+				limitations = analysis.Limitations
+			}
+		}
+		papersSummary = append(papersSummary, fmt.Sprintf("%d. {\"title\": %q, \"limitation\": %q}",
+			i+1, truncateText(p.Title, 100), truncateText(limitations, 200)))
+	}
+
+	return fmt.Sprintf(`Analyze these papers. Identify 3-5 research gaps.
+
+Topic: %s
+
+Papers:
+%s
+
+Return JSON only with this shape:
+{
+  "gaps": [
+    {
+      "gap_type": "unexplored|conflicting|limitation",
+      "title": "max 60 chars",
+      "description": "max 100 chars",
+      "evidence_indices": [1, 3],
+      "related_paper_indices": [1, 3]
+    }
+  ]
+}
+Use only 1-based paper indices from the list. Do not generate or reconstruct UUIDs.`, topic, strings.Join(papersSummary, "\n"))
+}
+
 func (g *GapDetector) storeGap(ctx context.Context, topicID string, gap ResearchGap) error {
 	_, err := g.postgres.Queries().CreateResearchGap(ctx, postgres.CreateResearchGapParams{
 		TopicID:         pgUUID(topicID),
@@ -118,68 +144,49 @@ func (g *GapDetector) storeGap(ctx context.Context, topicID string, gap Research
 	return err
 }
 
-func parseGapsFromNumberedList(result string) []ResearchGap {
-	var gaps []ResearchGap
-
-	blocks := strings.Split(result, "---GAP---")
-
-	for _, block := range blocks {
-		block = strings.TrimSpace(block)
-		if block == "" {
+func resolveGapReferences(items []gapDetectionItem, papers []*postgres.GetPapersByTopicForAnalysisRow) ([]ResearchGap, error) {
+	gaps := make([]ResearchGap, 0, len(items))
+	for itemIndex, item := range items {
+		if strings.TrimSpace(item.Title) == "" {
 			continue
 		}
 
-		gap := parseSingleGap(block)
-		if gap != nil && gap.Title != "" {
-			gaps = append(gaps, *gap)
+		evidenceIDs, err := resolvePaperIndices(item.EvidenceIndices, papers, fmt.Sprintf("gap %d evidence", itemIndex+1))
+		if err != nil {
+			return nil, err
 		}
-	}
+		relatedIDs, err := resolvePaperIndices(item.RelatedPaperIndices, papers, fmt.Sprintf("gap %d related papers", itemIndex+1))
+		if err != nil {
+			return nil, err
+		}
 
-	return gaps
+		gapType := item.GapType
+		if gapType == "" {
+			gapType = "unexplored"
+		}
+		gaps = append(gaps, ResearchGap{
+			GapType:       gapType,
+			Title:         truncateText(item.Title, 60),
+			Description:   truncateText(item.Description, 100),
+			Evidence:      strings.Join(evidenceIDs, ","),
+			RelatedPapers: relatedIDs,
+		})
+	}
+	return gaps, nil
 }
 
-func parseSingleGap(block string) *ResearchGap {
-	lines := strings.Split(block, "\n")
-	if len(lines) < 4 {
-		return nil
-	}
-
-	extractField := func(lines []string, prefix string, maxLen int) string {
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(line), strings.ToLower(prefix)) {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) > 1 {
-					value := strings.TrimSpace(parts[1])
-					if len(value) > maxLen {
-						value = value[:maxLen]
-					}
-					return value
-				}
-			}
+func resolvePaperIndices(indices []int, papers []*postgres.GetPapersByTopicForAnalysisRow, field string) ([]string, error) {
+	ids := make([]string, 0, len(indices))
+	seen := make(map[int]struct{}, len(indices))
+	for _, index := range indices {
+		if index < 1 || index > len(papers) {
+			return nil, fmt.Errorf("%s contains index %d, want 1..%d", field, index, len(papers))
 		}
-		return ""
-	}
-
-	gap := &ResearchGap{
-		GapType:     extractField(lines, "1. type", 20),
-		Title:       extractField(lines, "2. title", 60),
-		Description: extractField(lines, "3. description", 100),
-		Evidence:    extractField(lines, "4. evidence", 200),
-	}
-
-	relatedStr := extractField(lines, "5. related", 200)
-	if relatedStr != "" {
-		ids := strings.Split(relatedStr, ",")
-		for i, id := range ids {
-			ids[i] = strings.TrimSpace(id)
+		if _, exists := seen[index]; exists {
+			return nil, fmt.Errorf("%s contains duplicate index %d", field, index)
 		}
-		gap.RelatedPapers = ids
+		seen[index] = struct{}{}
+		ids = append(ids, papers[index-1].ID.String())
 	}
-
-	if gap.GapType == "" {
-		gap.GapType = "unexplored"
-	}
-
-	return gap
+	return ids, nil
 }

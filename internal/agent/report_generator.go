@@ -113,6 +113,7 @@ func (r *ReportGenerator) buildPaperSummaries(papers []*postgres.GetPapersByTopi
 		summary := PaperSummary{
 			ID:       p.ID.String(),
 			Title:    p.Title,
+			Authors:  append([]string(nil), p.Authors...),
 			Abstract: pgTextVal(p.Abstract),
 			Venue:    pgTextVal(p.Venue),
 		}
@@ -235,6 +236,7 @@ func (r *ReportGenerator) generateBibTeX(papers []*postgres.GetPapersByTopicForA
 	for _, p := range papers {
 		entry := &bibtex.Entry{
 			ID:       p.ID.String(),
+			Authors:  append([]string(nil), p.Authors...),
 			Title:    p.Title,
 			Abstract: pgTextVal(p.Abstract),
 			Venue:    pgTextVal(p.Venue),
