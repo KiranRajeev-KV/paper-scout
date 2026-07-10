@@ -39,8 +39,10 @@ func (s *SSEManager) Unsubscribe(topicID string, ch chan []byte) {
 	defer s.mu.Unlock()
 
 	if clients, ok := s.clients[topicID]; ok {
-		delete(clients, ch)
-		close(ch)
+		if _, subscribed := clients[ch]; subscribed {
+			delete(clients, ch)
+			close(ch)
+		}
 
 		if len(clients) == 0 {
 			delete(s.clients, topicID)
@@ -74,10 +76,9 @@ func (s *SSEManager) Broadcast(event interface{}) {
 	message := formatSSE(eventType, data)
 
 	s.mu.RLock()
-	clients := s.clients[topicID]
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
-	for ch := range clients {
+	for ch := range s.clients[topicID] {
 		select {
 		case ch <- []byte(message):
 		default:
