@@ -15,10 +15,16 @@ import (
 	"github.com/paper-scout/internal/logger"
 )
 
+const (
+	defaultMaxGrobidResponseBytes int64 = 16 << 20
+	maxGrobidErrorBytes           int64 = 64 << 10
+)
+
 type GrobidClient struct {
 	httpClient *http.Client
 	baseURL    string
 	policy     *httpresilience.Policy
+	maxBytes   int64
 }
 
 func NewGrobidClientWithPolicy(baseURL string, timeout time.Duration, policy *httpresilience.Policy) *GrobidClient {
@@ -27,12 +33,26 @@ func NewGrobidClientWithPolicy(baseURL string, timeout time.Duration, policy *ht
 	return client
 }
 
+func NewGrobidClientWithPolicyAndMaxBytes(baseURL string, timeout time.Duration, policy *httpresilience.Policy, maxBytes int64) *GrobidClient {
+	client := NewGrobidClientWithMaxBytes(baseURL, timeout, maxBytes)
+	client.policy = policy
+	return client
+}
+
 func NewGrobidClient(baseURL string, timeout time.Duration) *GrobidClient {
+	return NewGrobidClientWithMaxBytes(baseURL, timeout, defaultMaxGrobidResponseBytes)
+}
+
+func NewGrobidClientWithMaxBytes(baseURL string, timeout time.Duration, maxBytes int64) *GrobidClient {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxGrobidResponseBytes
+	}
 	return &GrobidClient{
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		baseURL: baseURL,
+		baseURL:  baseURL,
+		maxBytes: maxBytes,
 	}
 }
 
@@ -66,25 +86,38 @@ func (g *GrobidClient) Parse(ctx context.Context, filename string, data []byte) 
 
 	url := fmt.Sprintf("%s/api/processFulltextDocument", g.baseURL)
 	request := func(ctx context.Context) (*http.Response, error) {
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		part, err := writer.CreateFormFile("input", filename)
+		pipeReader, pipeWriter := io.Pipe()
+		writer := multipart.NewWriter(pipeWriter)
+		contentType := writer.FormDataContentType()
+		req, err := http.NewRequestWithContext(ctx, "POST", url, pipeReader)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create form file: %w", err)
-		}
-		if _, err := part.Write(data); err != nil {
-			return nil, fmt.Errorf("failed to write file data: %w", err)
-		}
-		if err := writer.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close writer: %w", err)
-		}
-		req, err := http.NewRequestWithContext(ctx, "POST", url, body)
-		if err != nil {
+			_ = pipeReader.CloseWithError(err)
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
-		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Accept", "application/xml")
-		return g.httpClient.Do(req)
+
+		go func() {
+			defer pipeWriter.Close()
+			part, err := writer.CreateFormFile("input", filename)
+			if err != nil {
+				_ = pipeWriter.CloseWithError(fmt.Errorf("failed to create form file: %w", err))
+				return
+			}
+			if _, err := io.Copy(part, bytes.NewReader(data)); err != nil {
+				_ = pipeWriter.CloseWithError(fmt.Errorf("failed to write file data: %w", err))
+				return
+			}
+			if err := writer.Close(); err != nil {
+				_ = pipeWriter.CloseWithError(fmt.Errorf("failed to close writer: %w", err))
+			}
+		}()
+
+		resp, err := g.httpClient.Do(req)
+		if err != nil {
+			_ = pipeReader.CloseWithError(err)
+		}
+		return resp, err
 	}
 	var resp *http.Response
 	var err error
@@ -96,25 +129,33 @@ func (g *GrobidClient) Parse(ctx context.Context, filename string, data []byte) 
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxGrobidErrorBytes))
 			return nil, fmt.Errorf("grobid failed with status %d: %s", resp.StatusCode, string(body))
 		}
 		return nil, fmt.Errorf("grobid request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("grobid failed with status %d: %s", resp.StatusCode, string(respBody))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxGrobidErrorBytes))
+		return nil, fmt.Errorf("grobid failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tei TEI
-	if err := xml.Unmarshal(respBody, &tei); err != nil {
+	limited := &countingReader{Reader: io.LimitReader(resp.Body, g.maxBytes+1)}
+	decoder := xml.NewDecoder(limited)
+	if err := decoder.Decode(&tei); err != nil {
+		if limited.N > g.maxBytes {
+			return nil, fmt.Errorf("GROBID response exceeds maximum size of %d bytes", g.maxBytes)
+		}
 		return nil, fmt.Errorf("failed to parse XML response: %w", err)
+	}
+	_, err = io.Copy(io.Discard, limited)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if limited.N > g.maxBytes {
+		return nil, fmt.Errorf("GROBID response exceeds maximum size of %d bytes", g.maxBytes)
 	}
 
 	logger.Debug().
@@ -123,6 +164,17 @@ func (g *GrobidClient) Parse(ctx context.Context, filename string, data []byte) 
 		Msg("PDF parsed with Grobid")
 
 	return &tei, nil
+}
+
+type countingReader struct {
+	io.Reader
+	N int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.N += int64(n)
+	return n, err
 }
 
 func (g *GrobidClient) ExtractText(tei *TEI) string {

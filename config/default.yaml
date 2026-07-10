@@ -28,6 +28,7 @@ database:
     port: 6334
     collection: default
     api_key: ""
+    use_tls: false
 
 llm:
   provider: gemini
@@ -82,6 +83,7 @@ apis:
       failure_threshold: 5
       open_timeout: 30s
     timeout: 60s
+    max_response_bytes: 16777216
 
 pipeline:
   max_papers: 50
@@ -91,6 +93,7 @@ pipeline:
   worker_pool_size: 10
   job_timeout: 60s
   pdf_download_timeout: 15s
+  pdf_max_bytes: 52428800
   pdf_rate_limit:
     requests_per_second: 1
     burst: 2

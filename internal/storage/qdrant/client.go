@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/qdrant/go-client/qdrant"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/logger"
+	"github.com/qdrant/go-client/qdrant"
 )
 
 const (
@@ -21,8 +21,10 @@ type Client struct {
 
 func NewClient(ctx context.Context, cfg config.QdrantConfig) (*Client, error) {
 	client, err := qdrant.NewClient(&qdrant.Config{
-		Host: cfg.Host,
-		Port: cfg.Port,
+		Host:   cfg.Host,
+		Port:   cfg.Port,
+		APIKey: cfg.APIKey,
+		UseTLS: cfg.UseTLS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create qdrant client: %w", err)
@@ -53,34 +55,65 @@ func NewClient(ctx context.Context, cfg config.QdrantConfig) (*Client, error) {
 }
 
 func (c *Client) ensureCollection(ctx context.Context) error {
-	collections, err := c.client.ListCollections(ctx)
+	exists, err := c.client.CollectionExists(ctx, c.collection)
 	if err != nil {
-		return fmt.Errorf("failed to list collections: %w", err)
+		return fmt.Errorf("failed to check collection %q: %w", c.collection, err)
 	}
 
-	for _, col := range collections {
-		if col == c.collection {
-			return nil
+	if !exists {
+		err = c.client.CreateCollection(ctx, &qdrant.CreateCollection{
+			CollectionName: c.collection,
+			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+				Size:     VectorSize,
+				Distance: qdrant.Distance_Cosine,
+			}),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create collection: %w", err)
 		}
+		logger.Info().Str("collection", c.collection).Msg("Created Qdrant collection")
 	}
 
-	err = c.client.CreateCollection(ctx, &qdrant.CreateCollection{
-		CollectionName: c.collection,
-		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
-			Size:     VectorSize,
-			Distance: qdrant.Distance_Cosine,
-		}),
-	})
+	info, err := c.client.GetCollectionInfo(ctx, c.collection)
 	if err != nil {
-		return fmt.Errorf("failed to create collection: %w", err)
+		return fmt.Errorf("failed to inspect collection %q: %w", c.collection, err)
+	}
+	return validateCollectionSchema(c.collection, info)
+}
+
+func validateCollectionSchema(collection string, info *qdrant.CollectionInfo) error {
+	if info == nil || info.GetConfig() == nil || info.GetConfig().GetParams() == nil {
+		return fmt.Errorf("collection %q has no vector configuration", collection)
 	}
 
-	logger.Info().Str("collection", c.collection).Msg("Created Qdrant collection")
+	vectors := info.GetConfig().GetParams().GetVectorsConfig()
+	if vectors == nil {
+		return fmt.Errorf("collection %q has no vector configuration", collection)
+	}
+	if vectors.GetParamsMap() != nil {
+		return fmt.Errorf("collection %q uses named vectors; expected one unnamed dense vector", collection)
+	}
+
+	params := vectors.GetParams()
+	if params == nil {
+		return fmt.Errorf("collection %q has no unnamed dense vector configuration", collection)
+	}
+	if params.GetSize() != VectorSize {
+		return fmt.Errorf("collection %q has vector size %d; expected %d", collection, params.GetSize(), VectorSize)
+	}
+	if params.GetDistance() != qdrant.Distance_Cosine {
+		return fmt.Errorf("collection %q uses distance %s; expected cosine", collection, params.GetDistance())
+	}
 	return nil
 }
 
 func (c *Client) Close() error {
 	return c.client.Close()
+}
+
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.client.ListCollections(ctx)
+	return err
 }
 
 func (c *Client) Upsert(ctx context.Context, points []*qdrant.PointStruct) error {

@@ -71,6 +71,7 @@ type QdrantConfig struct {
 	Port       int    `koanf:"port"`
 	Collection string `koanf:"collection"`
 	APIKey     string `koanf:"api_key"`
+	UseTLS     bool   `koanf:"use_tls"`
 }
 
 func (q QdrantConfig) Addr() string {
@@ -126,10 +127,11 @@ type ArXivConfig struct {
 }
 
 type GrobidConfig struct {
-	BaseURL    string           `koanf:"base_url"`
-	RateLimit  RateLimitConfig  `koanf:"rate_limit"`
-	Resilience ResilienceConfig `koanf:"resilience"`
-	Timeout    time.Duration    `koanf:"timeout"`
+	BaseURL          string           `koanf:"base_url"`
+	RateLimit        RateLimitConfig  `koanf:"rate_limit"`
+	Resilience       ResilienceConfig `koanf:"resilience"`
+	Timeout          time.Duration    `koanf:"timeout"`
+	MaxResponseBytes int64            `koanf:"max_response_bytes"`
 }
 
 type PipelineConfig struct {
@@ -140,6 +142,7 @@ type PipelineConfig struct {
 	WorkerPoolSize       int              `koanf:"worker_pool_size"`
 	JobTimeout           time.Duration    `koanf:"job_timeout"`
 	PDFDownloadTimeout   time.Duration    `koanf:"pdf_download_timeout"`
+	PDFMaxBytes          int64            `koanf:"pdf_max_bytes"`
 	PDFRateLimit         RateLimitConfig  `koanf:"pdf_rate_limit"`
 	PDFResilience        ResilienceConfig `koanf:"pdf_resilience"`
 	UseRedisQueue        bool             `koanf:"use_redis_queue"`

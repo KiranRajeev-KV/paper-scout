@@ -61,6 +61,9 @@ func (r RedisConfig) Validate() error {
 }
 
 func (q QdrantConfig) Validate() error {
+	if q.APIKey != "" && !q.UseTLS {
+		return fmt.Errorf("qdrant API key requires TLS")
+	}
 	return validation.ValidateStruct(&q,
 		validation.Field(&q.Host, validation.Required),
 		validation.Field(&q.Port, validation.Required, validation.Min(1), validation.Max(65535)),
@@ -83,6 +86,7 @@ func (p PipelineConfig) Validate() error {
 		validation.Field(&p.MaxPapers, validation.Required, validation.Min(1)),
 		validation.Field(&p.MinPapersForAnalysis, validation.Required, validation.Min(1)),
 		validation.Field(&p.WorkerPoolSize, validation.Required, validation.Min(1)),
+		validation.Field(&p.PDFMaxBytes, validation.Required, validation.Min(1)),
 	)
 }
 
@@ -125,6 +129,7 @@ func (g GrobidConfig) Validate() error {
 		validation.Field(&g.Timeout, validation.Required),
 		validation.Field(&g.RateLimit, validation.Required),
 		validation.Field(&g.Resilience, validation.Required),
+		validation.Field(&g.MaxResponseBytes, validation.Required, validation.Min(1)),
 	)
 }
 

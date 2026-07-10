@@ -4,20 +4,25 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/paper-scout/internal/httpresilience"
 	"github.com/paper-scout/internal/logger"
 )
 
+const defaultMaxPDFBytes int64 = 50 << 20
+
 type Downloader struct {
 	httpClient *http.Client
 	timeout    time.Duration
 	tmpDir     string
 	policy     *httpresilience.Policy
+	maxBytes   int64
 }
 
 func NewDownloaderWithPolicy(timeout time.Duration, policy *httpresilience.Policy) *Downloader {
@@ -26,13 +31,27 @@ func NewDownloaderWithPolicy(timeout time.Duration, policy *httpresilience.Polic
 	return d
 }
 
+func NewDownloaderWithPolicyAndMaxBytes(timeout time.Duration, policy *httpresilience.Policy, maxBytes int64) *Downloader {
+	d := NewDownloaderWithMaxBytes(timeout, maxBytes)
+	d.policy = policy
+	return d
+}
+
 func NewDownloader(timeout time.Duration) *Downloader {
+	return NewDownloaderWithMaxBytes(timeout, defaultMaxPDFBytes)
+}
+
+func NewDownloaderWithMaxBytes(timeout time.Duration, maxBytes int64) *Downloader {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxPDFBytes
+	}
 	return &Downloader{
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		timeout: timeout,
-		tmpDir:  os.TempDir(),
+		timeout:  timeout,
+		tmpDir:   os.TempDir(),
+		maxBytes: maxBytes,
 	}
 }
 
@@ -76,15 +95,24 @@ func (d *Downloader) Download(ctx context.Context, url string) (string, []byte, 
 	if resp.StatusCode != http.StatusOK {
 		return "", nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
 	}
+	if err := validatePDFContentType(resp.Header.Get("Content-Type")); err != nil {
+		return "", nil, err
+	}
+	if resp.ContentLength > d.maxBytes {
+		return "", nil, fmt.Errorf("PDF response exceeds maximum size of %d bytes", d.maxBytes)
+	}
 
 	filename := d.extractFilename(url)
 	if filename == "" {
 		filename = fmt.Sprintf("paper_%d.pdf", time.Now().UnixNano())
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, d.maxBytes+1))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if int64(len(data)) > d.maxBytes {
+		return "", nil, fmt.Errorf("PDF response exceeds maximum size of %d bytes", d.maxBytes)
 	}
 
 	logger.Debug().
@@ -94,6 +122,21 @@ func (d *Downloader) Download(ctx context.Context, url string) (string, []byte, 
 		Msg("PDF downloaded")
 
 	return filename, data, nil
+}
+
+func validatePDFContentType(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return fmt.Errorf("invalid PDF content type %q", value)
+	}
+	if mediaType != "application/pdf" && mediaType != "application/octet-stream" {
+		return fmt.Errorf("unexpected PDF content type %q", mediaType)
+	}
+	return nil
 }
 
 func (d *Downloader) DownloadToTemp(ctx context.Context, url string) (string, error) {
