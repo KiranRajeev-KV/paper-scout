@@ -26,7 +26,7 @@ func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		return &PaperAnalysis{ProblemStatement: abstract, Dataset: pdfURL}, nil
 	}
-	analyzer.storeFn = func(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
+	analyzer.storeFn = func(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
 		mu.Lock()
 		defer mu.Unlock()
 		stored = append(stored, paperID)
@@ -78,7 +78,7 @@ func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
 		}
 		return &PaperAnalysis{ProblemStatement: abstract}, nil
 	}
-	analyzer.storeFn = func(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
+	analyzer.storeFn = func(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
 		mu.Lock()
 		defer mu.Unlock()
 		stored = append(stored, paperID)
@@ -128,12 +128,13 @@ func TestAnalyzerHandleJobUsesPayloadMetadata(t *testing.T) {
 		gotPDFURL = pdfURL
 		return &PaperAnalysis{}, nil
 	}
-	analyzer.storeFn = func(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
+	analyzer.storeFn = func(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
 		return nil
 	}
 
 	job := worker.NewJob(worker.TypePaperAnalysis, map[string]interface{}{
 		"paper_id": "paper-123",
+		"topic_id": "topic-123",
 		"abstract": "short abstract",
 		"pdf_url":  "https://example.com/paper.pdf",
 	})

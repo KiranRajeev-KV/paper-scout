@@ -50,8 +50,8 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 	var papersSummary []string
 	for _, p := range papers {
 		var analysis PaperAnalysis
-		if p.Analysis != nil {
-			if err := json.Unmarshal(p.Analysis, &analysis); err == nil {
+		if p.TopicAnalysis != nil {
+			if err := json.Unmarshal(p.TopicAnalysis, &analysis); err == nil {
 				summary := fmt.Sprintf("- %s: %s (Limitations: %s)", p.ID.String()[:8], truncateText(p.Title, 50), truncateText(analysis.Limitations, 50))
 				papersSummary = append(papersSummary, summary)
 			}

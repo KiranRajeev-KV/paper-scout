@@ -54,7 +54,7 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	ranker.getPapersByTopicFn = func(ctx context.Context, topicID string) ([]*postgres.Paper, error) {
 		return []*postgres.Paper{paperA, paperB}, nil
 	}
-	ranker.updateRelevanceScoreFn = func(ctx context.Context, paperID uuid.UUID, score float64) error {
+	ranker.updateRelevanceScoreFn = func(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error {
 		updatedScores[paperID] = score
 		return nil
 	}
@@ -110,7 +110,7 @@ func TestRankerRankDeduplicatesQdrantResultsByPaper(t *testing.T) {
 	ranker.getPapersByTopicFn = func(ctx context.Context, topicID string) ([]*postgres.Paper, error) {
 		return []*postgres.Paper{paper}, nil
 	}
-	ranker.updateRelevanceScoreFn = func(ctx context.Context, paperID uuid.UUID, score float64) error {
+	ranker.updateRelevanceScoreFn = func(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error {
 		if !cmp.Equal(score, 0.88, cmpopts.EquateApprox(0, 1e-6)) {
 			t.Fatalf("unexpected score: %f", score)
 		}

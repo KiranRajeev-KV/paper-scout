@@ -34,7 +34,7 @@ type Ranker struct {
 	storeEmbeddingFn        func(ctx context.Context, emb embedding.PaperEmbedding) error
 	searchSimilarFn         func(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*embedding.SearchResult, error)
 	getPapersByTopicFn      func(ctx context.Context, topicID string) ([]*postgres.Paper, error)
-	updateRelevanceScoreFn  func(ctx context.Context, paperID uuid.UUID, score float64) error
+	updateRelevanceScoreFn  func(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error
 	updateEmbeddingStatusFn func(ctx context.Context, paperID uuid.UUID, status string) error
 }
 
@@ -139,7 +139,7 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 			RelevanceScore: s.score,
 		})
 
-		if err := r.updateRelevanceScoreFn(ctx, s.paper.ID, s.score); err != nil {
+		if err := r.updateRelevanceScoreFn(ctx, topicID, s.paper.ID, s.score); err != nil {
 			logger.Warn().Err(err).Str("paper_id", s.paper.ID.String()).Msg("Failed to update relevance score")
 		}
 	}
@@ -360,9 +360,10 @@ func (r *Ranker) getPapersByTopic(ctx context.Context, topicID string) ([]*postg
 	return r.postgres.Queries().GetPapersByTopic(ctx, pgUUID(topicID))
 }
 
-func (r *Ranker) updateRelevanceScore(ctx context.Context, paperID uuid.UUID, score float64) error {
-	_, err := r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
-		ID:             paperID,
+func (r *Ranker) updateRelevanceScore(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error {
+	err := r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
+		TopicID:        pgUUID(topicID),
+		PaperID:        paperID,
 		RelevanceScore: pgFloat64(score),
 	})
 	return err

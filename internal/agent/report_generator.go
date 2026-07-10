@@ -106,7 +106,7 @@ func (r *ReportGenerator) Generate(ctx context.Context, topicID string) (*Report
 	return report, nil
 }
 
-func (r *ReportGenerator) buildPaperSummaries(papers []*postgres.Paper) []PaperSummary {
+func (r *ReportGenerator) buildPaperSummaries(papers []*postgres.GetPapersByTopicForAnalysisRow) []PaperSummary {
 	summaries := make([]PaperSummary, 0, len(papers))
 
 	for _, p := range papers {
@@ -117,12 +117,12 @@ func (r *ReportGenerator) buildPaperSummaries(papers []*postgres.Paper) []PaperS
 			Venue:    pgTextVal(p.Venue),
 		}
 
-		summary.RelevanceScore = pgFloat64Val(p.RelevanceScore)
+		summary.RelevanceScore = pgFloat64Val(p.TopicRelevanceScore)
 		summary.Year = pgDateVal(p.PublicationDate)
 
-		if p.Analysis != nil {
+		if p.TopicAnalysis != nil {
 			var analysis PaperAnalysis
-			if err := json.Unmarshal(p.Analysis, &analysis); err == nil {
+			if err := json.Unmarshal(p.TopicAnalysis, &analysis); err == nil {
 				summary.ProblemStatement = analysis.ProblemStatement
 				summary.Methodology = analysis.Methodology
 				summary.KeyFindings = analysis.KeyFindings
@@ -229,7 +229,7 @@ func (r *ReportGenerator) generateLiteratureReview(papers []PaperSummary) string
 	return b.String()
 }
 
-func (r *ReportGenerator) generateBibTeX(papers []*postgres.Paper) string {
+func (r *ReportGenerator) generateBibTeX(papers []*postgres.GetPapersByTopicForAnalysisRow) string {
 	entries := make([]*bibtex.Entry, 0, len(papers))
 
 	for _, p := range papers {

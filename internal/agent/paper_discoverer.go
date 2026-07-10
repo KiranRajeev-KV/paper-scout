@@ -168,9 +168,9 @@ func (d *PaperDiscoverer) searchArXiv(ctx context.Context, query string, limit i
 }
 
 func (d *PaperDiscoverer) storePaper(ctx context.Context, topicID string, paper DiscoveredPaper) error {
-	_, err := d.postgres.Queries().CreatePaper(ctx, postgres.CreatePaperParams{
+	err := d.postgres.Queries().CreatePaper(ctx, postgres.CreatePaperParams{
 		TopicID:         pgUUID(topicID),
-		Source:          paper.Source,
+		DiscoverySource: paper.Source,
 		ExternalID:      paper.ExternalID,
 		SourceUrl:       pgText(paper.URL),
 		Title:           paper.Title,

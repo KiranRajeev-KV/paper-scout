@@ -26,7 +26,7 @@ type Analyzer struct {
 	batches    map[string]*analysisBatch
 	jobToBatch map[string]string
 	analyzeFn  func(ctx context.Context, paperID, abstract, pdfURL string) (*PaperAnalysis, error)
-	storeFn    func(ctx context.Context, paperID string, analysis *PaperAnalysis) error
+	storeFn    func(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error
 	generateFn func(ctx context.Context, prompt string) (string, error)
 }
 
@@ -118,13 +118,17 @@ func (a *Analyzer) HandleJob(ctx context.Context, job worker.Job) error {
 	if paperID == "" {
 		return fmt.Errorf("missing paper_id in job payload")
 	}
+	topicID := job.GetString("topic_id")
+	if topicID == "" {
+		return fmt.Errorf("missing topic_id in job payload")
+	}
 
 	analysis, err := a.AnalyzeSync(ctx, paperID, job.GetString("abstract"), job.GetString("pdf_url"))
 	if err != nil {
 		return err
 	}
 
-	if err := a.StoreAnalysis(ctx, paperID, analysis); err != nil {
+	if err := a.StoreAnalysis(ctx, topicID, paperID, analysis); err != nil {
 		return fmt.Errorf("failed to store analysis: %w", err)
 	}
 
@@ -316,18 +320,19 @@ func parseNumberedListToAnalysis(result string) *PaperAnalysis {
 	return analysis
 }
 
-func (a *Analyzer) StoreAnalysis(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
-	return a.storeFn(ctx, paperID, analysis)
+func (a *Analyzer) StoreAnalysis(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
+	return a.storeFn(ctx, topicID, paperID, analysis)
 }
 
-func (a *Analyzer) storeAnalysis(ctx context.Context, paperID string, analysis *PaperAnalysis) error {
+func (a *Analyzer) storeAnalysis(ctx context.Context, topicID, paperID string, analysis *PaperAnalysis) error {
 	analysisJSON, err := json.Marshal(analysis)
 	if err != nil {
 		return fmt.Errorf("failed to marshal analysis: %w", err)
 	}
 
-	_, err = a.postgres.Queries().UpdatePaperAnalysis(ctx, postgres.UpdatePaperAnalysisParams{
-		ID:       pgUUID(paperID),
+	err = a.postgres.Queries().UpdatePaperAnalysis(ctx, postgres.UpdatePaperAnalysisParams{
+		TopicID:  pgUUID(topicID),
+		PaperID:  pgUUID(paperID),
 		Analysis: analysisJSON,
 	})
 
