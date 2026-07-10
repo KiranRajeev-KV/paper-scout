@@ -66,10 +66,10 @@ func (m *Metrics) SetQueued(count int64) {
 	m.JobsQueued = count
 }
 
-func (m *Metrics) SetActive(count int) {
+func (m *Metrics) AddActive(delta int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.ActiveWorkers = count
+	m.ActiveWorkers += delta
 }
 
 func (m *Metrics) Snapshot() (processed, failed, queued int64, active int) {
@@ -152,8 +152,6 @@ func (p *Pool) Start() {
 func (p *Pool) worker(id int) {
 	defer p.wg.Done()
 
-	p.metrics.SetActive(p.workers)
-
 	if p.useRedis {
 		p.redisWorker(id)
 	} else {
@@ -218,6 +216,8 @@ func (p *Pool) redisWorker(id int) {
 
 func (p *Pool) processJobWithRedisTracking(workerID int, job Job, redisJob *redis.Job) error {
 	start := time.Now()
+	p.metrics.AddActive(1)
+	defer p.metrics.AddActive(-1)
 
 	ctx, cancel := context.WithTimeout(p.ctx, job.Timeout)
 	defer cancel()
@@ -281,6 +281,8 @@ func (p *Pool) jobToRedisJob(job Job, source *redis.Job) *redis.Job {
 
 func (p *Pool) processJob(workerID int, job Job) {
 	start := time.Now()
+	p.metrics.AddActive(1)
+	defer p.metrics.AddActive(-1)
 
 	ctx, cancel := context.WithTimeout(p.ctx, job.Timeout)
 	defer cancel()

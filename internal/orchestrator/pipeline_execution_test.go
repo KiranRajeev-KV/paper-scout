@@ -56,10 +56,11 @@ func TestRecoveredPipelineResumesFromCheckpoint(t *testing.T) {
 
 func newStageTestOrchestrator(record func(Stage)) *Orchestrator {
 	o := &Orchestrator{
-		appCtx:  context.Background(),
-		config:  &config.Config{Pipeline: config.PipelineConfig{MaxPapers: 10, MinPapersForAnalysis: 1}},
-		sse:     NewSSEManager(),
-		reports: make(map[string]*agent.Report),
+		appCtx:    context.Background(),
+		config:    &config.Config{Pipeline: config.PipelineConfig{MaxPapers: 10, MinPapersForAnalysis: 1}},
+		sse:       NewSSEManager(),
+		pipelines: make(map[string]*Pipeline),
+		reports:   make(map[string]*agent.Report),
 	}
 	o.stageCompletedFn = func(context.Context, *Pipeline, Stage, interface{}) (bool, error) { return false, nil }
 	o.startStageFn = func(context.Context, *Pipeline, Stage) error { return nil }

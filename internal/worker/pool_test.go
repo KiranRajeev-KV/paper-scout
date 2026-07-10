@@ -86,6 +86,74 @@ func TestConcurrentSubmitAndStop(t *testing.T) {
 	}
 }
 
+func TestWorkerMetricsTrackActiveJobs(t *testing.T) {
+	pool := NewPool(1, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	pool.SetHandler(func(context.Context, Job) error {
+		close(started)
+		<-release
+		return nil
+	})
+	pool.Start()
+
+	if err := pool.Submit(Job{ID: "active-job", Type: TypePaperAnalysis, Timeout: time.Second}); err != nil {
+		t.Fatalf("submit job: %v", err)
+	}
+	<-started
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, _, _, active := pool.GetMetrics()
+		if active == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active jobs = %d, want 1", active)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(release)
+	deadline = time.Now().Add(time.Second)
+	for {
+		_, _, _, active := pool.GetMetrics()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active jobs = %d, want 0", active)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	pool.Stop()
+}
+
+func TestStopAndWaitHonorsTimeout(t *testing.T) {
+	pool := NewPool(1, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	pool.SetHandler(func(context.Context, Job) error {
+		close(started)
+		<-release
+		return nil
+	})
+	pool.Start()
+	if err := pool.Submit(Job{ID: "blocking-job", Type: TypePaperAnalysis, Timeout: time.Hour}); err != nil {
+		t.Fatalf("submit job: %v", err)
+	}
+	<-started
+
+	begin := time.Now()
+	pool.StopAndWait(25 * time.Millisecond)
+	if elapsed := time.Since(begin); elapsed > 500*time.Millisecond {
+		t.Fatalf("StopAndWait took %s, want it to honor timeout", elapsed)
+	}
+
+	close(release)
+	pool.Stop()
+}
+
 type fakeRedisQueue struct {
 	failResult redispkg.FailResult
 	failJob    redispkg.Job
