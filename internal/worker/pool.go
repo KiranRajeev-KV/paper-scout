@@ -320,11 +320,18 @@ func (p *Pool) notifyCompletion(job Job, err error, terminal bool) {
 }
 
 func (p *Pool) Submit(job Job) error {
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+
 	p.mu.Lock()
 	started := p.started
 	p.mu.Unlock()
 
 	if !started {
+		if err := p.ctx.Err(); err != nil {
+			return err
+		}
 		p.Start()
 	}
 
@@ -385,10 +392,6 @@ func (p *Pool) stop() {
 	p.mu.Unlock()
 
 	p.cancel()
-
-	if !p.useRedis && p.jobQueue != nil {
-		close(p.jobQueue)
-	}
 }
 
 func (p *Pool) StopAndWait(timeout time.Duration) {

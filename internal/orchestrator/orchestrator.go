@@ -44,11 +44,28 @@ type Orchestrator struct {
 	workerPool *worker.Pool
 	runFn      func(context.Context, *Pipeline)
 
+	// Test hooks keep stage-transition coverage independent of external services.
+	stageCompletedFn       func(context.Context, *Pipeline, Stage, interface{}) (bool, error)
+	startStageFn           func(context.Context, *Pipeline, Stage) error
+	completeStageFn        func(context.Context, *Pipeline, Stage, interface{}) error
+	persistTerminalStateFn func(context.Context, *Pipeline) error
+	expandFn               func(context.Context, string, string) (*agent.ExpandedQuery, error)
+	discoverFn             func(context.Context, string, string, *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error)
+	countPapersFn          func(context.Context, string) (int64, error)
+	rankFn                 func(context.Context, string, string, int) ([]agent.RankedPaper, error)
+	pendingRankedPapersFn  func(context.Context, string, []agent.RankedPaper) ([]agent.RankedPaper, error)
+	analyzePapersFn        func(context.Context, string, []agent.RankedPaper) error
+	detectFn               func(context.Context, string, string) ([]agent.ResearchGap, error)
+	evaluateFn             func(context.Context, string, []agent.ResearchGap) ([]agent.FeasibilityResult, error)
+	generateReportFn       func(context.Context, string) (*agent.Report, error)
+
 	sse   *SSEManager
 	state *StateManager
 
 	mu        sync.RWMutex
 	pipelines map[string]*Pipeline
+	reportMu  sync.Mutex
+	reports   map[string]*agent.Report
 }
 
 type Pipeline struct {
@@ -92,16 +109,16 @@ func NewOrchestrator(
 		appCtx = context.Background()
 	}
 	appCtx, appCancel := context.WithCancel(appCtx)
-	downloader := pdf.NewDownloaderWithPolicy(cfg.Pipeline.PDFDownloadTimeout, httpresilience.New("pdf", httpresilience.Config{
+	downloader := pdf.NewDownloaderWithPolicyAndMaxBytes(cfg.Pipeline.PDFDownloadTimeout, httpresilience.New("pdf", httpresilience.Config{
 		MaxRetries: cfg.Pipeline.PDFResilience.MaxRetries, BaseBackoff: cfg.Pipeline.PDFResilience.BaseBackoff,
 		MaxBackoff: cfg.Pipeline.PDFResilience.MaxBackoff, FailureThreshold: cfg.Pipeline.PDFResilience.FailureThreshold,
 		OpenTimeout: cfg.Pipeline.PDFResilience.OpenTimeout,
-	}, cfg.Pipeline.PDFRateLimit.RequestsPerSecond, cfg.Pipeline.PDFRateLimit.Burst, nil))
-	parser := pdf.NewGrobidClientWithPolicy(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout, httpresilience.New("grobid", httpresilience.Config{
+	}, cfg.Pipeline.PDFRateLimit.RequestsPerSecond, cfg.Pipeline.PDFRateLimit.Burst, nil), cfg.Pipeline.PDFMaxBytes)
+	parser := pdf.NewGrobidClientWithPolicyAndMaxBytes(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout, httpresilience.New("grobid", httpresilience.Config{
 		MaxRetries: cfg.APIs.Grobid.Resilience.MaxRetries, BaseBackoff: cfg.APIs.Grobid.Resilience.BaseBackoff,
 		MaxBackoff: cfg.APIs.Grobid.Resilience.MaxBackoff, FailureThreshold: cfg.APIs.Grobid.Resilience.FailureThreshold,
 		OpenTimeout: cfg.APIs.Grobid.Resilience.OpenTimeout,
-	}, cfg.APIs.Grobid.RateLimit.RequestsPerSecond, cfg.APIs.Grobid.RateLimit.Burst, nil))
+	}, cfg.APIs.Grobid.RateLimit.RequestsPerSecond, cfg.APIs.Grobid.RateLimit.Burst, nil), cfg.APIs.Grobid.MaxResponseBytes)
 
 	embedder := embedding.NewGenerator(llmClient, qdrantClient)
 
@@ -128,6 +145,7 @@ func NewOrchestrator(
 		sse:        NewSSEManager(),
 		state:      NewStateManager(redisClient),
 		pipelines:  make(map[string]*Pipeline),
+		reports:    make(map[string]*agent.Report),
 	}
 
 	o.queryExpander = agent.NewQueryExpander(llmClient, pg)
@@ -206,40 +224,40 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 	}()
 
 	var expanded *agent.ExpandedQuery
-	queryCompleted, err := o.stageCompleted(ctx, p, StageQueryExpand, &expanded)
+	queryCompleted, err := o.isStageCompleted(ctx, p, StageQueryExpand, &expanded)
 	if err != nil {
 		o.failPipeline(ctx, p, StageQueryExpand, err)
 		return
 	}
 	if !queryCompleted {
 		o.updateStatus(p, StageQueryExpand, 0.05, "")
-		if err := o.startStage(ctx, p, StageQueryExpand); err != nil {
+		if err := o.beginStage(ctx, p, StageQueryExpand); err != nil {
 			o.failPipeline(ctx, p, StageQueryExpand, err)
 			return
 		}
-		expanded, err = o.queryExpander.Expand(ctx, p.TopicID, p.Topic)
+		expanded, err = o.expand(ctx, p.TopicID, p.Topic)
 		if err != nil {
 			o.failPipeline(ctx, p, StageQueryExpand, err)
 			return
 		}
-		if err := o.completeStage(ctx, p, StageQueryExpand, expanded); err != nil {
+		if err := o.finishStage(ctx, p, StageQueryExpand, expanded); err != nil {
 			o.failPipeline(ctx, p, StageQueryExpand, err)
 			return
 		}
 	}
 
-	discoveryCompleted, err := o.stageCompleted(ctx, p, StageDiscovery, nil)
+	discoveryCompleted, err := o.isStageCompleted(ctx, p, StageDiscovery, nil)
 	if err != nil {
 		o.failPipeline(ctx, p, StageDiscovery, err)
 		return
 	}
 	if !discoveryCompleted {
 		o.updateStatus(p, StageDiscovery, 0.15, "")
-		if err := o.startStage(ctx, p, StageDiscovery); err != nil {
+		if err := o.beginStage(ctx, p, StageDiscovery); err != nil {
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
 		}
-		papers, err := o.discoverWithRetry(ctx, p.TopicID, p.Topic, expanded)
+		papers, err := o.discover(ctx, p.TopicID, p.Topic, expanded)
 		if err != nil {
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
@@ -249,12 +267,12 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
 		}
-		if err := o.completeStage(ctx, p, StageDiscovery, map[string]int{"papers": len(papers)}); err != nil {
+		if err := o.finishStage(ctx, p, StageDiscovery, map[string]int{"papers": len(papers)}); err != nil {
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
 		}
 	} else {
-		count, countErr := o.paperDiscoverer.CountPapers(ctx, p.TopicID)
+		count, countErr := o.countPapers(ctx, p.TopicID)
 		if countErr != nil || count < int64(o.config.Pipeline.MinPapersForAnalysis) {
 			err := fmt.Errorf("recovered discovery has insufficient papers: %d", count)
 			if countErr != nil {
@@ -266,113 +284,115 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 	}
 
 	var ranked []agent.RankedPaper
-	rankingCompleted, err := o.stageCompleted(ctx, p, StageRanking, &ranked)
+	rankingCompleted, err := o.isStageCompleted(ctx, p, StageRanking, &ranked)
 	if err != nil {
 		o.failPipeline(ctx, p, StageRanking, err)
 		return
 	}
 	if !rankingCompleted {
 		o.updateStatus(p, StageRanking, 0.25, "")
-		if err := o.startStage(ctx, p, StageRanking); err != nil {
+		if err := o.beginStage(ctx, p, StageRanking); err != nil {
 			o.failPipeline(ctx, p, StageRanking, err)
 			return
 		}
-		ranked, err = o.ranker.Rank(ctx, p.TopicID, p.Topic, o.config.Pipeline.MaxPapers)
+		ranked, err = o.rank(ctx, p.TopicID, p.Topic, o.config.Pipeline.MaxPapers)
 		if err != nil {
 			o.failPipeline(ctx, p, StageRanking, err)
 			return
 		}
-		if err := o.completeStage(ctx, p, StageRanking, ranked); err != nil {
+		if err := o.finishStage(ctx, p, StageRanking, ranked); err != nil {
 			o.failPipeline(ctx, p, StageRanking, err)
 			return
 		}
 	}
 
-	analysisCompleted, err := o.stageCompleted(ctx, p, StageAnalysis, nil)
+	analysisCompleted, err := o.isStageCompleted(ctx, p, StageAnalysis, nil)
 	if err != nil {
 		o.failPipeline(ctx, p, StageAnalysis, err)
 		return
 	}
 	if !analysisCompleted {
 		o.updateStatus(p, StageAnalysis, 0.35, "")
-		if err := o.startStage(ctx, p, StageAnalysis); err != nil {
+		if err := o.beginStage(ctx, p, StageAnalysis); err != nil {
 			o.failPipeline(ctx, p, StageAnalysis, err)
 			return
 		}
-		pending, err := o.pendingRankedPapers(ctx, p.TopicID, ranked)
+		pending, err := o.pendingPapers(ctx, p.TopicID, ranked)
 		if err != nil {
 			o.failPipeline(ctx, p, StageAnalysis, err)
 			return
 		}
-		if err := o.analyzePapers(ctx, p.TopicID, pending); err != nil {
+		if err := o.analyze(ctx, p.TopicID, pending); err != nil {
 			logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
 		}
-		if err := o.completeStage(ctx, p, StageAnalysis, map[string]int{"papers": len(pending)}); err != nil {
+		if err := o.finishStage(ctx, p, StageAnalysis, map[string]int{"papers": len(pending)}); err != nil {
 			o.failPipeline(ctx, p, StageAnalysis, err)
 			return
 		}
 	}
 
 	var gaps []agent.ResearchGap
-	gapsCompleted, err := o.stageCompleted(ctx, p, StageGapDetection, &gaps)
+	gapsCompleted, err := o.isStageCompleted(ctx, p, StageGapDetection, &gaps)
 	if err != nil {
 		o.failPipeline(ctx, p, StageGapDetection, err)
 		return
 	}
 	if !gapsCompleted {
 		o.updateStatus(p, StageGapDetection, 0.65, "")
-		if err := o.startStage(ctx, p, StageGapDetection); err != nil {
+		if err := o.beginStage(ctx, p, StageGapDetection); err != nil {
 			o.failPipeline(ctx, p, StageGapDetection, err)
 			return
 		}
-		gaps, err = o.gapDetector.Detect(ctx, p.TopicID, p.Topic)
+		gaps, err = o.detect(ctx, p.TopicID, p.Topic)
 		if err != nil {
 			o.failPipeline(ctx, p, StageGapDetection, err)
 			return
 		}
-		if err := o.completeStage(ctx, p, StageGapDetection, gaps); err != nil {
+		if err := o.finishStage(ctx, p, StageGapDetection, gaps); err != nil {
 			o.failPipeline(ctx, p, StageGapDetection, err)
 			return
 		}
 	}
 
-	feasibilityCompleted, err := o.stageCompleted(ctx, p, StageFeasibility, nil)
+	feasibilityCompleted, err := o.isStageCompleted(ctx, p, StageFeasibility, nil)
 	if err != nil {
 		o.failPipeline(ctx, p, StageFeasibility, err)
 		return
 	}
 	if !feasibilityCompleted {
 		o.updateStatus(p, StageFeasibility, 0.80, "")
-		if err := o.startStage(ctx, p, StageFeasibility); err != nil {
+		if err := o.beginStage(ctx, p, StageFeasibility); err != nil {
 			o.failPipeline(ctx, p, StageFeasibility, err)
 			return
 		}
-		results, evalErr := o.feasibility.Evaluate(ctx, p.TopicID, gaps)
+		results, evalErr := o.evaluate(ctx, p.TopicID, gaps)
 		if evalErr != nil {
 			logger.Warn().Err(evalErr).Msg("Feasibility evaluation had errors, continuing...")
 		}
-		if err := o.completeStage(ctx, p, StageFeasibility, results); err != nil {
+		if err := o.finishStage(ctx, p, StageFeasibility, results); err != nil {
 			o.failPipeline(ctx, p, StageFeasibility, err)
 			return
 		}
 	}
 
-	reportCompleted, err := o.stageCompleted(ctx, p, StageReport, nil)
+	reportCompleted, err := o.isStageCompleted(ctx, p, StageReport, nil)
 	if err != nil {
 		o.failPipeline(ctx, p, StageReport, err)
 		return
 	}
 	if !reportCompleted {
 		o.updateStatus(p, StageReport, 0.90, "")
-		if err := o.startStage(ctx, p, StageReport); err != nil {
+		if err := o.beginStage(ctx, p, StageReport); err != nil {
 			o.failPipeline(ctx, p, StageReport, err)
 			return
 		}
-		if _, err := o.reportGenerator.Generate(ctx, p.TopicID); err != nil {
+		report, err := o.generateReport(ctx, p.TopicID)
+		if err != nil {
 			o.failPipeline(ctx, p, StageReport, err)
 			return
 		}
-		if err := o.completeStage(ctx, p, StageReport, map[string]bool{"generated": true}); err != nil {
+		o.cacheReport(p.TopicID, report)
+		if err := o.finishStage(ctx, p, StageReport, map[string]bool{"generated": true}); err != nil {
 			o.failPipeline(ctx, p, StageReport, err)
 			return
 		}
@@ -380,7 +400,7 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 
 	o.updateStatus(p, StageCompleted, 1.0, "")
 
-	if err := o.persistTerminalState(ctx, p); err != nil {
+	if err := o.persistTerminal(ctx, p); err != nil {
 		logger.Warn().Err(err).Str("topic_id", p.TopicID).Msg("Failed to persist completed topic state")
 	}
 
@@ -394,6 +414,97 @@ func (o *Orchestrator) failPipeline(ctx context.Context, p *Pipeline, stage Stag
 	if dbErr := o.failStage(persistCtx, p, stage, err); dbErr != nil {
 		logger.Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic state")
 	}
+}
+
+func (o *Orchestrator) isStageCompleted(ctx context.Context, p *Pipeline, stage Stage, output interface{}) (bool, error) {
+	if o.stageCompletedFn != nil {
+		return o.stageCompletedFn(ctx, p, stage, output)
+	}
+	return o.stageCompleted(ctx, p, stage, output)
+}
+
+func (o *Orchestrator) beginStage(ctx context.Context, p *Pipeline, stage Stage) error {
+	if o.startStageFn != nil {
+		return o.startStageFn(ctx, p, stage)
+	}
+	return o.startStage(ctx, p, stage)
+}
+
+func (o *Orchestrator) finishStage(ctx context.Context, p *Pipeline, stage Stage, output interface{}) error {
+	if o.completeStageFn != nil {
+		return o.completeStageFn(ctx, p, stage, output)
+	}
+	return o.completeStage(ctx, p, stage, output)
+}
+
+func (o *Orchestrator) persistTerminal(ctx context.Context, p *Pipeline) error {
+	if o.persistTerminalStateFn != nil {
+		return o.persistTerminalStateFn(ctx, p)
+	}
+	return o.persistTerminalState(ctx, p)
+}
+
+func (o *Orchestrator) expand(ctx context.Context, topicID, topic string) (*agent.ExpandedQuery, error) {
+	if o.expandFn != nil {
+		return o.expandFn(ctx, topicID, topic)
+	}
+	return o.queryExpander.Expand(ctx, topicID, topic)
+}
+
+func (o *Orchestrator) discover(ctx context.Context, topicID, topic string, expanded *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error) {
+	if o.discoverFn != nil {
+		return o.discoverFn(ctx, topicID, topic, expanded)
+	}
+	return o.discoverWithRetry(ctx, topicID, topic, expanded)
+}
+
+func (o *Orchestrator) countPapers(ctx context.Context, topicID string) (int64, error) {
+	if o.countPapersFn != nil {
+		return o.countPapersFn(ctx, topicID)
+	}
+	return o.paperDiscoverer.CountPapers(ctx, topicID)
+}
+
+func (o *Orchestrator) rank(ctx context.Context, topicID, topic string, maxPapers int) ([]agent.RankedPaper, error) {
+	if o.rankFn != nil {
+		return o.rankFn(ctx, topicID, topic, maxPapers)
+	}
+	return o.ranker.Rank(ctx, topicID, topic, maxPapers)
+}
+
+func (o *Orchestrator) pendingPapers(ctx context.Context, topicID string, ranked []agent.RankedPaper) ([]agent.RankedPaper, error) {
+	if o.pendingRankedPapersFn != nil {
+		return o.pendingRankedPapersFn(ctx, topicID, ranked)
+	}
+	return o.pendingRankedPapers(ctx, topicID, ranked)
+}
+
+func (o *Orchestrator) analyze(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
+	if o.analyzePapersFn != nil {
+		return o.analyzePapersFn(ctx, topicID, papers)
+	}
+	return o.analyzePapers(ctx, topicID, papers)
+}
+
+func (o *Orchestrator) detect(ctx context.Context, topicID, topic string) ([]agent.ResearchGap, error) {
+	if o.detectFn != nil {
+		return o.detectFn(ctx, topicID, topic)
+	}
+	return o.gapDetector.Detect(ctx, topicID, topic)
+}
+
+func (o *Orchestrator) evaluate(ctx context.Context, topicID string, gaps []agent.ResearchGap) ([]agent.FeasibilityResult, error) {
+	if o.evaluateFn != nil {
+		return o.evaluateFn(ctx, topicID, gaps)
+	}
+	return o.feasibility.Evaluate(ctx, topicID, gaps)
+}
+
+func (o *Orchestrator) generateReport(ctx context.Context, topicID string) (*agent.Report, error) {
+	if o.generateReportFn != nil {
+		return o.generateReportFn(ctx, topicID)
+	}
+	return o.reportGenerator.Generate(ctx, topicID)
 }
 
 func (o *Orchestrator) pendingRankedPapers(ctx context.Context, topicID string, ranked []agent.RankedPaper) ([]agent.RankedPaper, error) {
@@ -536,15 +647,19 @@ func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, 
 
 	o.publishPipeline(p)
 
-	o.state.Save(o.appCtx, p.TopicID, p)
+	if o.state != nil {
+		_ = o.state.Save(o.appCtx, p.TopicID, p)
+	}
 
-	o.sse.Broadcast(statusEvent{
-		TopicID:  p.TopicID,
-		Status:   p.Status,
-		Stage:    string(stage),
-		Progress: progress,
-		Error:    errMsg,
-	})
+	if o.sse != nil {
+		o.sse.Broadcast(statusEvent{
+			TopicID:  p.TopicID,
+			Status:   p.Status,
+			Stage:    string(stage),
+			Progress: progress,
+			Error:    errMsg,
+		})
+	}
 
 	logger.Debug().
 		Str("topic_id", p.TopicID).
@@ -583,7 +698,33 @@ func (o *Orchestrator) publishPipeline(p *Pipeline) {
 }
 
 func (o *Orchestrator) GetReport(ctx context.Context, topicID string) (*agent.Report, error) {
-	return o.reportGenerator.Generate(ctx, topicID)
+	o.reportMu.Lock()
+	defer o.reportMu.Unlock()
+	if report, ok := o.reports[topicID]; ok {
+		return report, nil
+	}
+
+	report, err := o.reportGenerator.Generate(ctx, topicID)
+	if err != nil {
+		return nil, err
+	}
+	if o.reports == nil {
+		o.reports = make(map[string]*agent.Report)
+	}
+	o.reports[topicID] = report
+	return report, nil
+}
+
+func (o *Orchestrator) cacheReport(topicID string, report *agent.Report) {
+	if report == nil {
+		return
+	}
+	o.reportMu.Lock()
+	if o.reports == nil {
+		o.reports = make(map[string]*agent.Report)
+	}
+	o.reports[topicID] = report
+	o.reportMu.Unlock()
 }
 
 func (o *Orchestrator) GetSSEManager() *SSEManager {
