@@ -1,15 +1,13 @@
 package api
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/paper-scout/internal/api/handler"
 	"github.com/paper-scout/internal/api/middleware"
 	"github.com/paper-scout/internal/orchestrator"
 )
 
-func SetupRouter(orch *orchestrator.Orchestrator) *gin.Engine {
+func SetupRouter(orch *orchestrator.Orchestrator, health *handler.HealthHandler) *gin.Engine {
 	r := gin.New()
 
 	r.Use(middleware.Logger())
@@ -28,9 +26,9 @@ func SetupRouter(orch *orchestrator.Orchestrator) *gin.Engine {
 		api.GET("/research/:id/bibtex", h.GetBibTeX)
 	}
 
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	r.GET("/health", health.Check)
+	r.GET("/health/live", health.Live)
+	r.GET("/health/ready", health.Check)
 
 	return r
 }

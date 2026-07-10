@@ -49,13 +49,51 @@ func (h *Handler) CreateResearch(c *gin.Context) {
 }
 
 type ResearchResponse struct {
-	TopicID   string  `json:"topic_id"`
-	Topic     string  `json:"topic"`
-	Status    string  `json:"status"`
-	Stage     string  `json:"stage"`
-	Progress  float64 `json:"progress"`
-	StartedAt string  `json:"started_at"`
-	Error     string  `json:"error,omitempty"`
+	TopicID          string              `json:"topic_id"`
+	Topic            string              `json:"topic"`
+	Status           string              `json:"status"`
+	Stage            string              `json:"stage"`
+	Progress         float64             `json:"progress"`
+	StartedAt        string              `json:"started_at"`
+	Error            string              `json:"error,omitempty"`
+	ExecutiveSummary string              `json:"executive_summary,omitempty"`
+	LiteratureReview string              `json:"literature_review,omitempty"`
+	GeneratedAt      string              `json:"generated_at,omitempty"`
+	Papers           []PaperResponse     `json:"papers"`
+	ResearchGaps     []GapResponse       `json:"research_gaps"`
+	NovelDirections  []DirectionResponse `json:"novel_directions"`
+	BibTeX           string              `json:"bibtex,omitempty"`
+}
+
+type PaperResponse struct {
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Authors          []string `json:"authors"`
+	Year             int      `json:"year"`
+	Venue            string   `json:"venue"`
+	Abstract         string   `json:"abstract"`
+	ProblemStatement string   `json:"problem_statement"`
+	Methodology      string   `json:"methodology"`
+	KeyFindings      string   `json:"key_findings"`
+	Limitations      string   `json:"limitations"`
+	RelevanceScore   float64  `json:"relevance_score"`
+}
+
+type GapResponse struct {
+	Type        string `json:"gap_type"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Evidence    string `json:"evidence"`
+}
+
+type DirectionResponse struct {
+	Title             string  `json:"title"`
+	Description       string  `json:"description"`
+	Difficulty        string  `json:"difficulty"`
+	EstimatedCost     string  `json:"estimated_cost"`
+	IndustryViability string  `json:"industry_viability"`
+	TimeToMVP         string  `json:"time_to_mvp"`
+	FeasibilityScore  float64 `json:"feasibility_score"`
 }
 
 func (h *Handler) GetResearch(c *gin.Context) {
@@ -71,15 +109,76 @@ func (h *Handler) GetResearch(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, ResearchResponse{
-		TopicID:   pipeline.TopicID,
-		Topic:     pipeline.Topic,
-		Status:    pipeline.Status,
-		Stage:     string(pipeline.Stage),
-		Progress:  pipeline.Progress,
-		StartedAt: pipeline.StartedAt.Format(time.RFC3339),
-		Error:     pipeline.Error,
-	})
+	var report *agent.Report
+	if pipeline.Status == "completed" {
+		report, err = h.orch.GetReport(c.Request.Context(), topicID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Research result not found"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, buildResearchResponse(pipeline, report))
+}
+
+func buildResearchResponse(pipeline *orchestrator.Pipeline, report *agent.Report) ResearchResponse {
+	response := ResearchResponse{
+		TopicID:         pipeline.TopicID,
+		Topic:           pipeline.Topic,
+		Status:          pipeline.Status,
+		Stage:           string(pipeline.Stage),
+		Progress:        pipeline.Progress,
+		StartedAt:       pipeline.StartedAt.Format(time.RFC3339),
+		Error:           pipeline.Error,
+		Papers:          make([]PaperResponse, 0),
+		ResearchGaps:    make([]GapResponse, 0),
+		NovelDirections: make([]DirectionResponse, 0),
+	}
+	if report == nil {
+		return response
+	}
+	response.ExecutiveSummary = report.ExecutiveSummary
+	response.LiteratureReview = report.LiteratureReview
+	response.GeneratedAt = report.GeneratedAt.Format(time.RFC3339)
+	response.BibTeX = report.BibTeX
+	response.Papers = make([]PaperResponse, 0, len(report.Papers))
+	response.ResearchGaps = make([]GapResponse, 0, len(report.Gaps))
+	response.NovelDirections = make([]DirectionResponse, 0, len(report.Directions))
+	for _, paper := range report.Papers {
+		response.Papers = append(response.Papers, PaperResponse{
+			ID:               paper.ID,
+			Title:            paper.Title,
+			Authors:          append([]string(nil), paper.Authors...),
+			Year:             paper.Year,
+			Venue:            paper.Venue,
+			Abstract:         paper.Abstract,
+			ProblemStatement: paper.ProblemStatement,
+			Methodology:      paper.Methodology,
+			KeyFindings:      paper.KeyFindings,
+			Limitations:      paper.Limitations,
+			RelevanceScore:   paper.RelevanceScore,
+		})
+	}
+	for _, gap := range report.Gaps {
+		response.ResearchGaps = append(response.ResearchGaps, GapResponse{
+			Type:        gap.Type,
+			Title:       gap.Title,
+			Description: gap.Description,
+			Evidence:    gap.Evidence,
+		})
+	}
+	for _, direction := range report.Directions {
+		response.NovelDirections = append(response.NovelDirections, DirectionResponse{
+			Title:             direction.Title,
+			Description:       direction.Description,
+			Difficulty:        direction.Difficulty,
+			EstimatedCost:     direction.EstimatedCost,
+			IndustryViability: direction.IndustryViability,
+			TimeToMVP:         direction.TimeToMVP,
+			FeasibilityScore:  direction.FeasibilityScore,
+		})
+	}
+	return response
 }
 
 type StatusResponse struct {

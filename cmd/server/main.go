@@ -11,6 +11,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/paper-scout/internal/api"
+	"github.com/paper-scout/internal/api/handler"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
@@ -89,7 +90,7 @@ func main() {
 	)
 	defer orch.Shutdown()
 
-	router := api.SetupRouter(orch)
+	router := api.SetupRouter(orch, handler.NewHealthHandler(pg, redisClient, qdrantClient, llmClient != nil))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
