@@ -9,7 +9,7 @@ services:
       POSTGRES_DB: research_agent
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U research -d research_agent"]
       interval: 5s

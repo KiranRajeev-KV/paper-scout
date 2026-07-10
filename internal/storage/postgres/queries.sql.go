@@ -47,7 +47,7 @@ func (q *Queries) AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) 
 }
 
 const countPapersByTopic = `-- name: CountPapersByTopic :one
-SELECT COUNT(*) FROM papers WHERE topic_id = $1
+SELECT COUNT(*) FROM topic_papers WHERE topic_id = $1
 `
 
 func (q *Queries) CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error) {
@@ -137,23 +137,34 @@ func (q *Queries) CreateNovelDirection(ctx context.Context, arg CreateNovelDirec
 	return &i, err
 }
 
-const createPaper = `-- name: CreatePaper :one
-INSERT INTO papers (
-    topic_id, source, external_id, source_url, title, abstract, 
-    publication_date, venue, pdf_url
+const createPaper = `-- name: CreatePaper :exec
+WITH paper AS (
+    INSERT INTO papers (
+        source, external_id, source_url, title, abstract,
+        publication_date, venue, pdf_url
+    )
+    VALUES ($2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (source, external_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        abstract = EXCLUDED.abstract,
+        source_url = EXCLUDED.source_url,
+        publication_date = EXCLUDED.publication_date,
+        venue = EXCLUDED.venue,
+        pdf_url = EXCLUDED.pdf_url,
+        updated_at = NOW()
+    RETURNING id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (source, external_id) DO UPDATE SET
-    title = EXCLUDED.title,
-    abstract = EXCLUDED.abstract,
-    source_url = EXCLUDED.source_url,
+INSERT INTO topic_papers (topic_id, paper_id, discovery_source)
+SELECT $1, id, $2
+FROM paper
+ON CONFLICT (topic_id, paper_id) DO UPDATE SET
+    discovery_source = EXCLUDED.discovery_source,
     updated_at = NOW()
-RETURNING id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
 `
 
 type CreatePaperParams struct {
 	TopicID         uuid.UUID   `json:"topic_id"`
-	Source          string      `json:"source"`
+	DiscoverySource string      `json:"discovery_source"`
 	ExternalID      string      `json:"external_id"`
 	SourceUrl       pgtype.Text `json:"source_url"`
 	Title           string      `json:"title"`
@@ -163,10 +174,10 @@ type CreatePaperParams struct {
 	PdfUrl          pgtype.Text `json:"pdf_url"`
 }
 
-func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) (*Paper, error) {
-	row := q.db.QueryRow(ctx, createPaper,
+func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) error {
+	_, err := q.db.Exec(ctx, createPaper,
 		arg.TopicID,
-		arg.Source,
+		arg.DiscoverySource,
 		arg.ExternalID,
 		arg.SourceUrl,
 		arg.Title,
@@ -175,27 +186,7 @@ func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) (*Pape
 		arg.Venue,
 		arg.PdfUrl,
 	)
-	var i Paper
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Source,
-		&i.ExternalID,
-		&i.SourceUrl,
-		&i.Title,
-		&i.Abstract,
-		&i.PublicationDate,
-		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
-		&i.EmbeddingStatus,
-		&i.PdfUrl,
-		&i.PdfDownloaded,
-		&i.PdfParsed,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return &i, err
+	return err
 }
 
 const createPipelineRun = `-- name: CreatePipelineRun :one
@@ -302,7 +293,17 @@ func (q *Queries) CreateResearchTopic(ctx context.Context, arg CreateResearchTop
 }
 
 const deletePapersByTopic = `-- name: DeletePapersByTopic :exec
-DELETE FROM papers WHERE topic_id = $1
+WITH removed AS (
+    DELETE FROM topic_papers
+    WHERE topic_papers.topic_id = $1
+    RETURNING paper_id
+)
+DELETE FROM papers p
+USING removed r
+WHERE p.id = r.paper_id
+  AND NOT EXISTS (
+      SELECT 1 FROM topic_papers tp WHERE tp.paper_id = p.id
+  )
 `
 
 func (q *Queries) DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error {
@@ -421,7 +422,7 @@ func (q *Queries) GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UU
 }
 
 const getPaper = `-- name: GetPaper :one
-SELECT id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE id = $1
+SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE id = $1
 `
 
 func (q *Queries) GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error) {
@@ -429,7 +430,6 @@ func (q *Queries) GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error) {
 	var i Paper
 	err := row.Scan(
 		&i.ID,
-		&i.TopicID,
 		&i.Source,
 		&i.ExternalID,
 		&i.SourceUrl,
@@ -437,8 +437,6 @@ func (q *Queries) GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error) {
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
 		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
@@ -483,7 +481,7 @@ func (q *Queries) GetPaperAuthors(ctx context.Context, paperID uuid.UUID) ([]*Au
 }
 
 const getPaperByExternalID = `-- name: GetPaperByExternalID :one
-SELECT id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE source = $1 AND external_id = $2
+SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE source = $1 AND external_id = $2
 `
 
 type GetPaperByExternalIDParams struct {
@@ -496,7 +494,6 @@ func (q *Queries) GetPaperByExternalID(ctx context.Context, arg GetPaperByExtern
 	var i Paper
 	err := row.Scan(
 		&i.ID,
-		&i.TopicID,
 		&i.Source,
 		&i.ExternalID,
 		&i.SourceUrl,
@@ -504,8 +501,6 @@ func (q *Queries) GetPaperByExternalID(ctx context.Context, arg GetPaperByExtern
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
 		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
@@ -517,7 +512,7 @@ func (q *Queries) GetPaperByExternalID(ctx context.Context, arg GetPaperByExtern
 }
 
 const getPaperCitations = `-- name: GetPaperCitations :many
-SELECT p.id, p.topic_id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.analysis, p.relevance_score, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
 JOIN citations c ON p.id = c.cited_paper_id
 WHERE c.citing_paper_id = $1
 `
@@ -533,7 +528,6 @@ func (q *Queries) GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID
 		var i Paper
 		if err := rows.Scan(
 			&i.ID,
-			&i.TopicID,
 			&i.Source,
 			&i.ExternalID,
 			&i.SourceUrl,
@@ -541,8 +535,6 @@ func (q *Queries) GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.Analysis,
-			&i.RelevanceScore,
 			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
@@ -561,7 +553,7 @@ func (q *Queries) GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID
 }
 
 const getPaperCitedBy = `-- name: GetPaperCitedBy :many
-SELECT p.id, p.topic_id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.analysis, p.relevance_score, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
 JOIN citations c ON p.id = c.citing_paper_id
 WHERE c.cited_paper_id = $1
 `
@@ -577,7 +569,6 @@ func (q *Queries) GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) (
 		var i Paper
 		if err := rows.Scan(
 			&i.ID,
-			&i.TopicID,
 			&i.Source,
 			&i.ExternalID,
 			&i.SourceUrl,
@@ -585,8 +576,6 @@ func (q *Queries) GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) (
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.Analysis,
-			&i.RelevanceScore,
 			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
@@ -605,7 +594,10 @@ func (q *Queries) GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) (
 }
 
 const getPapersByTopic = `-- name: GetPapersByTopic :many
-SELECT id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE topic_id = $1 ORDER BY relevance_score DESC NULLS LAST
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
+JOIN topic_papers tp ON tp.paper_id = p.id
+WHERE tp.topic_id = $1
+ORDER BY tp.relevance_score DESC NULLS LAST
 `
 
 func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*Paper, error) {
@@ -619,7 +611,6 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 		var i Paper
 		if err := rows.Scan(
 			&i.ID,
-			&i.TopicID,
 			&i.Source,
 			&i.ExternalID,
 			&i.SourceUrl,
@@ -627,8 +618,6 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.Analysis,
-			&i.RelevanceScore,
 			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
@@ -647,23 +636,43 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 }
 
 const getPapersByTopicForAnalysis = `-- name: GetPapersByTopicForAnalysis :many
-SELECT id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers 
-WHERE topic_id = $1 AND analysis IS NOT NULL
-ORDER BY relevance_score DESC NULLS LAST
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at, tp.analysis AS topic_analysis, tp.relevance_score AS topic_relevance_score
+FROM papers p
+JOIN topic_papers tp ON tp.paper_id = p.id
+WHERE tp.topic_id = $1 AND tp.analysis IS NOT NULL
+ORDER BY tp.relevance_score DESC NULLS LAST
 `
 
-func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*Paper, error) {
+type GetPapersByTopicForAnalysisRow struct {
+	ID                  uuid.UUID          `json:"id"`
+	Source              string             `json:"source"`
+	ExternalID          string             `json:"external_id"`
+	SourceUrl           pgtype.Text        `json:"source_url"`
+	Title               string             `json:"title"`
+	Abstract            pgtype.Text        `json:"abstract"`
+	PublicationDate     pgtype.Date        `json:"publication_date"`
+	Venue               pgtype.Text        `json:"venue"`
+	EmbeddingStatus     pgtype.Text        `json:"embedding_status"`
+	PdfUrl              pgtype.Text        `json:"pdf_url"`
+	PdfDownloaded       pgtype.Bool        `json:"pdf_downloaded"`
+	PdfParsed           pgtype.Bool        `json:"pdf_parsed"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	TopicAnalysis       []byte             `json:"topic_analysis"`
+	TopicRelevanceScore pgtype.Float8      `json:"topic_relevance_score"`
+}
+
+func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error) {
 	rows, err := q.db.Query(ctx, getPapersByTopicForAnalysis, topicID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []*Paper{}
+	items := []*GetPapersByTopicForAnalysisRow{}
 	for rows.Next() {
-		var i Paper
+		var i GetPapersByTopicForAnalysisRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.TopicID,
 			&i.Source,
 			&i.ExternalID,
 			&i.SourceUrl,
@@ -671,14 +680,14 @@ func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.Analysis,
-			&i.RelevanceScore,
 			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
 			&i.PdfParsed,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.TopicAnalysis,
+			&i.TopicRelevanceScore,
 		); err != nil {
 			return nil, err
 		}
@@ -889,48 +898,28 @@ func (q *Queries) ListResearchTopics(ctx context.Context, arg ListResearchTopics
 	return items, nil
 }
 
-const updatePaperAnalysis = `-- name: UpdatePaperAnalysis :one
-UPDATE papers 
-SET analysis = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
+const updatePaperAnalysis = `-- name: UpdatePaperAnalysis :exec
+UPDATE topic_papers
+SET analysis = $3, analysis_status = 'completed', updated_at = NOW()
+WHERE topic_id = $1 AND paper_id = $2
 `
 
 type UpdatePaperAnalysisParams struct {
-	ID       uuid.UUID       `json:"id"`
-	Analysis json.RawMessage `json:"analysis"`
+	TopicID  uuid.UUID `json:"topic_id"`
+	PaperID  uuid.UUID `json:"paper_id"`
+	Analysis []byte    `json:"analysis"`
 }
 
-func (q *Queries) UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) (*Paper, error) {
-	row := q.db.QueryRow(ctx, updatePaperAnalysis, arg.ID, arg.Analysis)
-	var i Paper
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Source,
-		&i.ExternalID,
-		&i.SourceUrl,
-		&i.Title,
-		&i.Abstract,
-		&i.PublicationDate,
-		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
-		&i.EmbeddingStatus,
-		&i.PdfUrl,
-		&i.PdfDownloaded,
-		&i.PdfParsed,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return &i, err
+func (q *Queries) UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error {
+	_, err := q.db.Exec(ctx, updatePaperAnalysis, arg.TopicID, arg.PaperID, arg.Analysis)
+	return err
 }
 
 const updatePaperEmbeddingStatus = `-- name: UpdatePaperEmbeddingStatus :one
 UPDATE papers 
 SET embedding_status = $2, updated_at = NOW()
 WHERE id = $1
-RETURNING id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
+RETURNING id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
 `
 
 type UpdatePaperEmbeddingStatusParams struct {
@@ -943,7 +932,6 @@ func (q *Queries) UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePape
 	var i Paper
 	err := row.Scan(
 		&i.ID,
-		&i.TopicID,
 		&i.Source,
 		&i.ExternalID,
 		&i.SourceUrl,
@@ -951,8 +939,6 @@ func (q *Queries) UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePape
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
 		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
@@ -967,7 +953,7 @@ const updatePaperPDFStatus = `-- name: UpdatePaperPDFStatus :one
 UPDATE papers 
 SET pdf_downloaded = $2, pdf_parsed = $3, updated_at = NOW()
 WHERE id = $1
-RETURNING id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
+RETURNING id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
 `
 
 type UpdatePaperPDFStatusParams struct {
@@ -981,7 +967,6 @@ func (q *Queries) UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFSt
 	var i Paper
 	err := row.Scan(
 		&i.ID,
-		&i.TopicID,
 		&i.Source,
 		&i.ExternalID,
 		&i.SourceUrl,
@@ -989,8 +974,6 @@ func (q *Queries) UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFSt
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
 		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
@@ -1001,41 +984,21 @@ func (q *Queries) UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFSt
 	return &i, err
 }
 
-const updatePaperRelevanceScore = `-- name: UpdatePaperRelevanceScore :one
-UPDATE papers 
-SET relevance_score = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING id, topic_id, source, external_id, source_url, title, abstract, publication_date, venue, analysis, relevance_score, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
+const updatePaperRelevanceScore = `-- name: UpdatePaperRelevanceScore :exec
+UPDATE topic_papers
+SET relevance_score = $3, updated_at = NOW()
+WHERE topic_id = $1 AND paper_id = $2
 `
 
 type UpdatePaperRelevanceScoreParams struct {
-	ID             uuid.UUID     `json:"id"`
+	TopicID        uuid.UUID     `json:"topic_id"`
+	PaperID        uuid.UUID     `json:"paper_id"`
 	RelevanceScore pgtype.Float8 `json:"relevance_score"`
 }
 
-func (q *Queries) UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) (*Paper, error) {
-	row := q.db.QueryRow(ctx, updatePaperRelevanceScore, arg.ID, arg.RelevanceScore)
-	var i Paper
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Source,
-		&i.ExternalID,
-		&i.SourceUrl,
-		&i.Title,
-		&i.Abstract,
-		&i.PublicationDate,
-		&i.Venue,
-		&i.Analysis,
-		&i.RelevanceScore,
-		&i.EmbeddingStatus,
-		&i.PdfUrl,
-		&i.PdfDownloaded,
-		&i.PdfParsed,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return &i, err
+func (q *Queries) UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error {
+	_, err := q.db.Exec(ctx, updatePaperRelevanceScore, arg.TopicID, arg.PaperID, arg.RelevanceScore)
+	return err
 }
 
 const updatePipelineRunStatus = `-- name: UpdatePipelineRunStatus :one

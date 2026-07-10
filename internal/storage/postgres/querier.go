@@ -17,7 +17,7 @@ type Querier interface {
 	CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error)
 	CreateAuthor(ctx context.Context, arg CreateAuthorParams) (*Author, error)
 	CreateNovelDirection(ctx context.Context, arg CreateNovelDirectionParams) (*NovelDirection, error)
-	CreatePaper(ctx context.Context, arg CreatePaperParams) (*Paper, error)
+	CreatePaper(ctx context.Context, arg CreatePaperParams) error
 	CreatePipelineRun(ctx context.Context, arg CreatePipelineRunParams) (*PipelineRun, error)
 	CreateResearchGap(ctx context.Context, arg CreateResearchGapParams) (*ResearchGap, error)
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
@@ -33,7 +33,7 @@ type Querier interface {
 	GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID) ([]*Paper, error)
 	GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) ([]*Paper, error)
 	GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*Paper, error)
-	GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*Paper, error)
+	GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error)
 	GetPipelineRun(ctx context.Context, id uuid.UUID) (*PipelineRun, error)
 	GetPipelineRunsByTopic(ctx context.Context, topicID uuid.UUID) ([]*PipelineRun, error)
 	GetResearchGap(ctx context.Context, id uuid.UUID) (*ResearchGap, error)
@@ -41,10 +41,10 @@ type Querier interface {
 	GetResearchTopic(ctx context.Context, id uuid.UUID) (*ResearchTopic, error)
 	GetResearchTopicByStatus(ctx context.Context, status string) ([]*ResearchTopic, error)
 	ListResearchTopics(ctx context.Context, arg ListResearchTopicsParams) ([]*ResearchTopic, error)
-	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) (*Paper, error)
+	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error
 	UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePaperEmbeddingStatusParams) (*Paper, error)
 	UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFStatusParams) (*Paper, error)
-	UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) (*Paper, error)
+	UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error
 	UpdatePipelineRunStatus(ctx context.Context, arg UpdatePipelineRunStatusParams) (*PipelineRun, error)
 	UpdateResearchTopicExpandedQueries(ctx context.Context, arg UpdateResearchTopicExpandedQueriesParams) (*ResearchTopic, error)
 	UpdateResearchTopicStatus(ctx context.Context, arg UpdateResearchTopicStatusParams) (*ResearchTopic, error)

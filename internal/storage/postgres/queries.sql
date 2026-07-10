@@ -33,18 +33,29 @@ RETURNING *;
 -- name: GetAuthorBySemanticScholarID :one
 SELECT * FROM authors WHERE semantic_scholar_id = $1;
 
--- name: CreatePaper :one
-INSERT INTO papers (
-    topic_id, source, external_id, source_url, title, abstract, 
-    publication_date, venue, pdf_url
+-- name: CreatePaper :exec
+WITH paper AS (
+    INSERT INTO papers (
+        source, external_id, source_url, title, abstract,
+        publication_date, venue, pdf_url
+    )
+    VALUES ($2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (source, external_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        abstract = EXCLUDED.abstract,
+        source_url = EXCLUDED.source_url,
+        publication_date = EXCLUDED.publication_date,
+        venue = EXCLUDED.venue,
+        pdf_url = EXCLUDED.pdf_url,
+        updated_at = NOW()
+    RETURNING id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (source, external_id) DO UPDATE SET
-    title = EXCLUDED.title,
-    abstract = EXCLUDED.abstract,
-    source_url = EXCLUDED.source_url,
-    updated_at = NOW()
-RETURNING *;
+INSERT INTO topic_papers (topic_id, paper_id, discovery_source)
+SELECT $1, id, $2
+FROM paper
+ON CONFLICT (topic_id, paper_id) DO UPDATE SET
+    discovery_source = EXCLUDED.discovery_source,
+    updated_at = NOW();
 
 -- name: GetPaper :one
 SELECT * FROM papers WHERE id = $1;
@@ -53,24 +64,27 @@ SELECT * FROM papers WHERE id = $1;
 SELECT * FROM papers WHERE source = $1 AND external_id = $2;
 
 -- name: GetPapersByTopic :many
-SELECT * FROM papers WHERE topic_id = $1 ORDER BY relevance_score DESC NULLS LAST;
+SELECT p.* FROM papers p
+JOIN topic_papers tp ON tp.paper_id = p.id
+WHERE tp.topic_id = $1
+ORDER BY tp.relevance_score DESC NULLS LAST;
 
 -- name: GetPapersByTopicForAnalysis :many
-SELECT * FROM papers 
-WHERE topic_id = $1 AND analysis IS NOT NULL
-ORDER BY relevance_score DESC NULLS LAST;
+SELECT p.*, tp.analysis AS topic_analysis, tp.relevance_score AS topic_relevance_score
+FROM papers p
+JOIN topic_papers tp ON tp.paper_id = p.id
+WHERE tp.topic_id = $1 AND tp.analysis IS NOT NULL
+ORDER BY tp.relevance_score DESC NULLS LAST;
 
--- name: UpdatePaperAnalysis :one
-UPDATE papers 
-SET analysis = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING *;
+-- name: UpdatePaperAnalysis :exec
+UPDATE topic_papers
+SET analysis = $3, analysis_status = 'completed', updated_at = NOW()
+WHERE topic_id = $1 AND paper_id = $2;
 
--- name: UpdatePaperRelevanceScore :one
-UPDATE papers 
-SET relevance_score = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING *;
+-- name: UpdatePaperRelevanceScore :exec
+UPDATE topic_papers
+SET relevance_score = $3, updated_at = NOW()
+WHERE topic_id = $1 AND paper_id = $2;
 
 -- name: UpdatePaperEmbeddingStatus :one
 UPDATE papers 
@@ -85,10 +99,20 @@ WHERE id = $1
 RETURNING *;
 
 -- name: CountPapersByTopic :one
-SELECT COUNT(*) FROM papers WHERE topic_id = $1;
+SELECT COUNT(*) FROM topic_papers WHERE topic_id = $1;
 
 -- name: DeletePapersByTopic :exec
-DELETE FROM papers WHERE topic_id = $1;
+WITH removed AS (
+    DELETE FROM topic_papers
+    WHERE topic_papers.topic_id = $1
+    RETURNING paper_id
+)
+DELETE FROM papers p
+USING removed r
+WHERE p.id = r.paper_id
+  AND NOT EXISTS (
+      SELECT 1 FROM topic_papers tp WHERE tp.paper_id = p.id
+  );
 
 -- name: AddPaperAuthor :exec
 INSERT INTO paper_authors (paper_id, author_id, position)

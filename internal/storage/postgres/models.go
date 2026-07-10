@@ -41,7 +41,6 @@ type NovelDirection struct {
 
 type Paper struct {
 	ID              uuid.UUID          `json:"id"`
-	TopicID         uuid.UUID          `json:"topic_id"`
 	Source          string             `json:"source"`
 	ExternalID      string             `json:"external_id"`
 	SourceUrl       pgtype.Text        `json:"source_url"`
@@ -49,8 +48,6 @@ type Paper struct {
 	Abstract        pgtype.Text        `json:"abstract"`
 	PublicationDate pgtype.Date        `json:"publication_date"`
 	Venue           pgtype.Text        `json:"venue"`
-	Analysis        json.RawMessage    `json:"analysis"`
-	RelevanceScore  pgtype.Float8      `json:"relevance_score"`
 	EmbeddingStatus pgtype.Text        `json:"embedding_status"`
 	PdfUrl          pgtype.Text        `json:"pdf_url"`
 	PdfDownloaded   pgtype.Bool        `json:"pdf_downloaded"`
@@ -97,4 +94,15 @@ type ResearchTopic struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+}
+
+type TopicPaper struct {
+	TopicID         uuid.UUID          `json:"topic_id"`
+	PaperID         uuid.UUID          `json:"paper_id"`
+	DiscoverySource string             `json:"discovery_source"`
+	RelevanceScore  pgtype.Float8      `json:"relevance_score"`
+	Analysis        []byte             `json:"analysis"`
+	AnalysisStatus  string             `json:"analysis_status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
