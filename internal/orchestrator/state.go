@@ -22,6 +22,7 @@ func (s *StateManager) Save(ctx context.Context, topicID string, pipeline *Pipel
 
 	state := &PipelineState{
 		TopicID:   pipeline.TopicID,
+		RunID:     pipeline.RunID,
 		Topic:     pipeline.Topic,
 		Status:    pipeline.Status,
 		Stage:     string(pipeline.Stage),
@@ -49,6 +50,7 @@ func (s *StateManager) Load(ctx context.Context, topicID string) (*Pipeline, err
 
 	return &Pipeline{
 		TopicID:   state.TopicID,
+		RunID:     state.RunID,
 		Topic:     state.Topic,
 		Status:    state.Status,
 		Stage:     Stage(state.Stage),
@@ -89,6 +91,7 @@ func (s *StateManager) ListRecoverable(ctx context.Context) ([]*Pipeline, error)
 
 			result = append(result, &Pipeline{
 				TopicID:   state.TopicID,
+				RunID:     state.RunID,
 				Topic:     state.Topic,
 				Status:    state.Status,
 				Stage:     Stage(state.Stage),
@@ -110,6 +113,7 @@ func (s *StateManager) ListRecoverable(ctx context.Context) ([]*Pipeline, error)
 
 type PipelineState struct {
 	TopicID   string    `json:"topic_id"`
+	RunID     string    `json:"run_id"`
 	Topic     string    `json:"topic"`
 	Status    string    `json:"status"`
 	Stage     string    `json:"stage"`

@@ -47,6 +47,7 @@ type Orchestrator struct {
 
 type Pipeline struct {
 	TopicID   string
+	RunID     string
 	Topic     string
 	Status    string
 	Stage     Stage
@@ -136,6 +137,7 @@ func (o *Orchestrator) StartResearch(ctx context.Context, topic string) (*Pipeli
 
 	pipeline := &Pipeline{
 		TopicID:   topicRecord.ID.String(),
+		RunID:     topicRecord.RunID.String(),
 		Topic:     topic,
 		Status:    "pending",
 		Stage:     StagePending,
@@ -161,64 +163,183 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error().Interface("panic", r).Str("topic_id", p.TopicID).Msg("Pipeline panicked")
+			o.failStage(ctx, p, p.Stage, fmt.Errorf("pipeline panic: %v", r))
 			o.updateStatus(p, StageFailed, 0, fmt.Sprintf("Pipeline panic: %v", r))
 		}
 	}()
 
-	o.updateStatus(p, StageQueryExpand, 0.05, "")
-
-	expanded, err := o.queryExpander.Expand(ctx, p.TopicID, p.Topic)
+	var expanded *agent.ExpandedQuery
+	queryCompleted, err := o.stageCompleted(ctx, p, StageQueryExpand, &expanded)
 	if err != nil {
-		o.updateStatus(p, StageFailed, 0, err.Error())
+		o.failPipeline(ctx, p, StageQueryExpand, err)
 		return
 	}
+	if !queryCompleted {
+		o.updateStatus(p, StageQueryExpand, 0.05, "")
+		if err := o.startStage(ctx, p, StageQueryExpand); err != nil {
+			o.failPipeline(ctx, p, StageQueryExpand, err)
+			return
+		}
+		expanded, err = o.queryExpander.Expand(ctx, p.TopicID, p.Topic)
+		if err != nil {
+			o.failPipeline(ctx, p, StageQueryExpand, err)
+			return
+		}
+		if err := o.completeStage(ctx, p, StageQueryExpand, expanded); err != nil {
+			o.failPipeline(ctx, p, StageQueryExpand, err)
+			return
+		}
+	}
 
-	o.updateStatus(p, StageDiscovery, 0.15, "")
-	papers, err := o.discoverWithRetry(ctx, p.TopicID, p.Topic, expanded)
+	discoveryCompleted, err := o.stageCompleted(ctx, p, StageDiscovery, nil)
 	if err != nil {
-		o.updateStatus(p, StageFailed, 0, err.Error())
+		o.failPipeline(ctx, p, StageDiscovery, err)
 		return
 	}
+	if !discoveryCompleted {
+		o.updateStatus(p, StageDiscovery, 0.15, "")
+		if err := o.startStage(ctx, p, StageDiscovery); err != nil {
+			o.failPipeline(ctx, p, StageDiscovery, err)
+			return
+		}
+		papers, err := o.discoverWithRetry(ctx, p.TopicID, p.Topic, expanded)
+		if err != nil {
+			o.failPipeline(ctx, p, StageDiscovery, err)
+			return
+		}
+		if len(papers) < o.config.Pipeline.MinPapersForAnalysis {
+			err := fmt.Errorf("not enough papers found: %d (minimum: %d)", len(papers), o.config.Pipeline.MinPapersForAnalysis)
+			o.failPipeline(ctx, p, StageDiscovery, err)
+			return
+		}
+		if err := o.completeStage(ctx, p, StageDiscovery, map[string]int{"papers": len(papers)}); err != nil {
+			o.failPipeline(ctx, p, StageDiscovery, err)
+			return
+		}
+	} else {
+		count, countErr := o.paperDiscoverer.CountPapers(ctx, p.TopicID)
+		if countErr != nil || count < int64(o.config.Pipeline.MinPapersForAnalysis) {
+			err := fmt.Errorf("recovered discovery has insufficient papers: %d", count)
+			if countErr != nil {
+				err = countErr
+			}
+			o.failPipeline(ctx, p, StageDiscovery, err)
+			return
+		}
+	}
 
-	if len(papers) < o.config.Pipeline.MinPapersForAnalysis {
-		o.updateStatus(p, StageFailed, 0, fmt.Sprintf("Not enough papers found: %d (minimum: %d)", len(papers), o.config.Pipeline.MinPapersForAnalysis))
+	var ranked []agent.RankedPaper
+	rankingCompleted, err := o.stageCompleted(ctx, p, StageRanking, &ranked)
+	if err != nil {
+		o.failPipeline(ctx, p, StageRanking, err)
 		return
 	}
+	if !rankingCompleted {
+		o.updateStatus(p, StageRanking, 0.25, "")
+		if err := o.startStage(ctx, p, StageRanking); err != nil {
+			o.failPipeline(ctx, p, StageRanking, err)
+			return
+		}
+		ranked, err = o.ranker.Rank(ctx, p.TopicID, p.Topic, o.config.Pipeline.MaxPapers)
+		if err != nil {
+			o.failPipeline(ctx, p, StageRanking, err)
+			return
+		}
+		if err := o.completeStage(ctx, p, StageRanking, ranked); err != nil {
+			o.failPipeline(ctx, p, StageRanking, err)
+			return
+		}
+	}
 
-	o.updateStatus(p, StageRanking, 0.25, "")
-	ranked, err := o.ranker.Rank(ctx, p.TopicID, p.Topic, o.config.Pipeline.MaxPapers)
+	analysisCompleted, err := o.stageCompleted(ctx, p, StageAnalysis, nil)
 	if err != nil {
-		o.updateStatus(p, StageFailed, 0, err.Error())
+		o.failPipeline(ctx, p, StageAnalysis, err)
 		return
 	}
-
-	o.updateStatus(p, StageAnalysis, 0.35, "")
-
-	if err := o.analyzePapers(ctx, p.TopicID, ranked); err != nil {
-		logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
+	if !analysisCompleted {
+		o.updateStatus(p, StageAnalysis, 0.35, "")
+		if err := o.startStage(ctx, p, StageAnalysis); err != nil {
+			o.failPipeline(ctx, p, StageAnalysis, err)
+			return
+		}
+		pending, err := o.pendingRankedPapers(ctx, p.TopicID, ranked)
+		if err != nil {
+			o.failPipeline(ctx, p, StageAnalysis, err)
+			return
+		}
+		if err := o.analyzePapers(ctx, p.TopicID, pending); err != nil {
+			logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
+		}
+		if err := o.completeStage(ctx, p, StageAnalysis, map[string]int{"papers": len(pending)}); err != nil {
+			o.failPipeline(ctx, p, StageAnalysis, err)
+			return
+		}
 	}
 
-	o.updateStatus(p, StageGapDetection, 0.65, "")
-	gaps, err := o.gapDetector.Detect(ctx, p.TopicID, p.Topic)
+	var gaps []agent.ResearchGap
+	gapsCompleted, err := o.stageCompleted(ctx, p, StageGapDetection, &gaps)
 	if err != nil {
-		o.updateStatus(p, StageFailed, 0, err.Error())
+		o.failPipeline(ctx, p, StageGapDetection, err)
 		return
 	}
-
-	o.updateStatus(p, StageFeasibility, 0.80, "")
-	_, err = o.feasibility.Evaluate(ctx, p.TopicID, gaps)
-	if err != nil {
-		logger.Warn().Err(err).Msg("Feasibility evaluation had errors, continuing...")
+	if !gapsCompleted {
+		o.updateStatus(p, StageGapDetection, 0.65, "")
+		if err := o.startStage(ctx, p, StageGapDetection); err != nil {
+			o.failPipeline(ctx, p, StageGapDetection, err)
+			return
+		}
+		gaps, err = o.gapDetector.Detect(ctx, p.TopicID, p.Topic)
+		if err != nil {
+			o.failPipeline(ctx, p, StageGapDetection, err)
+			return
+		}
+		if err := o.completeStage(ctx, p, StageGapDetection, gaps); err != nil {
+			o.failPipeline(ctx, p, StageGapDetection, err)
+			return
+		}
 	}
 
-	o.updateStatus(p, StageReport, 0.90, "")
-	report, err := o.reportGenerator.Generate(ctx, p.TopicID)
+	feasibilityCompleted, err := o.stageCompleted(ctx, p, StageFeasibility, nil)
 	if err != nil {
-		o.updateStatus(p, StageFailed, 0, err.Error())
+		o.failPipeline(ctx, p, StageFeasibility, err)
 		return
 	}
+	if !feasibilityCompleted {
+		o.updateStatus(p, StageFeasibility, 0.80, "")
+		if err := o.startStage(ctx, p, StageFeasibility); err != nil {
+			o.failPipeline(ctx, p, StageFeasibility, err)
+			return
+		}
+		results, evalErr := o.feasibility.Evaluate(ctx, p.TopicID, gaps)
+		if evalErr != nil {
+			logger.Warn().Err(evalErr).Msg("Feasibility evaluation had errors, continuing...")
+		}
+		if err := o.completeStage(ctx, p, StageFeasibility, results); err != nil {
+			o.failPipeline(ctx, p, StageFeasibility, err)
+			return
+		}
+	}
 
-	_ = report
+	reportCompleted, err := o.stageCompleted(ctx, p, StageReport, nil)
+	if err != nil {
+		o.failPipeline(ctx, p, StageReport, err)
+		return
+	}
+	if !reportCompleted {
+		o.updateStatus(p, StageReport, 0.90, "")
+		if err := o.startStage(ctx, p, StageReport); err != nil {
+			o.failPipeline(ctx, p, StageReport, err)
+			return
+		}
+		if _, err := o.reportGenerator.Generate(ctx, p.TopicID); err != nil {
+			o.failPipeline(ctx, p, StageReport, err)
+			return
+		}
+		if err := o.completeStage(ctx, p, StageReport, map[string]bool{"generated": true}); err != nil {
+			o.failPipeline(ctx, p, StageReport, err)
+			return
+		}
+	}
 
 	o.updateStatus(p, StageCompleted, 1.0, "")
 
@@ -231,6 +352,35 @@ func (o *Orchestrator) runPipeline(p *Pipeline) {
 	}
 
 	logger.Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
+}
+
+func (o *Orchestrator) failPipeline(ctx context.Context, p *Pipeline, stage Stage, err error) {
+	o.failStage(ctx, p, stage, err)
+	if _, dbErr := o.postgres.Queries().UpdateResearchTopicStatus(ctx, postgres.UpdateResearchTopicStatusParams{
+		ID:     parseUUID(p.TopicID),
+		Status: "failed",
+	}); dbErr != nil {
+		logger.Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic status")
+	}
+	o.updateStatus(p, StageFailed, 0, err.Error())
+}
+
+func (o *Orchestrator) pendingRankedPapers(ctx context.Context, topicID string, ranked []agent.RankedPaper) ([]agent.RankedPaper, error) {
+	completed, err := o.postgres.Queries().GetCompletedPaperIDsByTopic(ctx, parseUUID(topicID))
+	if err != nil {
+		return nil, fmt.Errorf("load completed paper analyses: %w", err)
+	}
+	completedIDs := make(map[string]struct{}, len(completed))
+	for _, id := range completed {
+		completedIDs[id.String()] = struct{}{}
+	}
+	pending := make([]agent.RankedPaper, 0, len(ranked))
+	for _, paper := range ranked {
+		if _, ok := completedIDs[paper.ID]; !ok {
+			pending = append(pending, paper)
+		}
+	}
+	return pending, nil
 }
 
 func (o *Orchestrator) analyzePapers(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
@@ -396,16 +546,57 @@ func (o *Orchestrator) Shutdown() {
 }
 
 func (o *Orchestrator) recoverPipelines(ctx context.Context) {
-	recoverable, err := o.state.ListRecoverable(ctx)
+	recoverable := make(map[string]*Pipeline)
+	redisPipelines, err := o.state.ListRecoverable(ctx)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to scan recoverable pipelines")
-		return
+		logger.Warn().Err(err).Msg("Failed to scan Redis pipeline state; falling back to Postgres")
+	} else {
+		for _, pipeline := range redisPipelines {
+			recoverable[pipeline.TopicID] = pipeline
+		}
 	}
-	if len(recoverable) == 0 {
-		return
+
+	durableTopics, err := o.postgres.Queries().ListRecoverableResearchTopics(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Msg("Failed to scan durable recoverable topics")
+	} else {
+		for _, topic := range durableTopics {
+			if _, exists := recoverable[topic.ID.String()]; exists {
+				continue
+			}
+
+			pipeline := &Pipeline{
+				TopicID:   topic.ID.String(),
+				RunID:     topic.RunID.String(),
+				Topic:     topic.Topic,
+				Status:    topic.Status,
+				Stage:     StagePending,
+				StartedAt: topic.CreatedAt.Time,
+				UpdatedAt: topic.UpdatedAt.Time,
+			}
+			checkpoints, checkpointErr := o.postgres.Queries().GetPipelineStages(ctx, topic.RunID)
+			if checkpointErr != nil {
+				logger.Warn().Err(checkpointErr).Str("topic_id", pipeline.TopicID).Msg("Failed to load durable pipeline checkpoints")
+			} else if len(checkpoints) > 0 {
+				latest := checkpoints[len(checkpoints)-1]
+				pipeline.Stage = Stage(latest.Stage)
+				if latest.UpdatedAt.Valid {
+					pipeline.UpdatedAt = latest.UpdatedAt.Time
+				}
+			}
+			recoverable[pipeline.TopicID] = pipeline
+		}
 	}
 
 	for _, pipeline := range recoverable {
+		if pipeline.RunID == "" {
+			topic, err := o.postgres.Queries().GetResearchTopic(ctx, parseUUID(pipeline.TopicID))
+			if err != nil {
+				logger.Warn().Err(err).Str("topic_id", pipeline.TopicID).Msg("Failed to resolve run ID during recovery")
+				continue
+			}
+			pipeline.RunID = topic.RunID.String()
+		}
 		o.mu.Lock()
 		if _, exists := o.pipelines[pipeline.TopicID]; exists {
 			o.mu.Unlock()
