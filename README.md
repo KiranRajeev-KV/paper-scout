@@ -39,6 +39,8 @@ curl -X POST http://localhost:8080/api/v1/research \
 
 `docker compose up -d` starts Postgres, Redis, Qdrant, and GROBID. The API server runs separately via `go run ./cmd/server`.
 
+Fresh Postgres volumes are initialized from `docker/postgres-init/`, which contains only the final forward schema. Existing databases created from the legacy `migrations/001_initial_schema` migration must be upgraded with Goose using `migrations/002_topic_paper_membership.up.sql`.
+
 ## Architecture
 
 ### Pipeline Stages
@@ -61,7 +63,7 @@ INPUT: Research Topic
          ▼
 ┌──────────────────┐
 │ 3. Ranking       │  SYNCHRONOUS
-│                  │  Embed abstracts, cosine similarity, LLM re-rank top 50
+│                  │  Embed abstracts, search Qdrant, LLM re-rank top 50
 └────────┬─────────┘
          │
          ▼

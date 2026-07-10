@@ -20,7 +20,7 @@ clean:
 logs:
     docker compose logs -f postgres redis qdrant grobid
 
-# Run migrations locally (requires goose)
+# Run Goose migrations for databases not initialized by Docker's init schema (requires goose)
 migrate:
     goose -dir migrations postgres "host=localhost port=5432 user=research password=research123 dbname=research_agent sslmode=disable" up
 

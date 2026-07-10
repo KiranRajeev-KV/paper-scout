@@ -349,6 +349,22 @@ Even then, document what you assumed.
 - 768 dimensions
 - Good quality for academic text
 
+### 13. PostgreSQL Container Initialization
+
+**Decision:** Mount a dedicated forward-only initialization directory into the official PostgreSQL image.
+
+**Rationale:** PostgreSQL executes every supported file in `/docker-entrypoint-initdb.d` on a fresh data volume. Goose rollback files must remain available under `migrations/`, but must not be exposed to that hook because lexical ordering can execute the rollback before the forward migration.
+
+**Implementation:** `docker/postgres-init/` contains only forward initialization SQL; `migrations/` remains the Goose migration source, including rollback files.
+
+### 14. Paper and Topic Membership Model
+
+**Decision:** Store paper metadata globally and represent topic membership with the `topic_papers` junction table.
+
+**Rationale:** A paper identified by `(source, external_id)` can be discovered for multiple research topics. Topic-specific discovery source, relevance score, and analysis must therefore live on the membership row, while embeddings and PDF processing state remain global paper properties.
+
+**Migration:** `002_topic_paper_membership` backfills one membership row for each existing paper before removing the legacy topic-owned columns.
+
 ---
 
 ## Pipeline Stages
@@ -575,7 +591,7 @@ See `config/default.yaml` for all configurable options.
 build:
     docker compose up --build -d
 
-# Run migrations locally
+# Run Goose migrations for databases not initialized by Docker's init schema
 migrate:
     goose -dir migrations postgres "host=localhost port=5432 user=research password=research123 dbname=research_agent sslmode=disable" up
 
