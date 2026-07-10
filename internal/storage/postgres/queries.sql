@@ -137,6 +137,55 @@ SET pdf_downloaded = $2, pdf_parsed = $3, updated_at = NOW()
 WHERE id = $1
 RETURNING *;
 
+-- name: UpsertPaperChunk :one
+INSERT INTO paper_chunks (
+    topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source,
+    embedding_status, error_message
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL)
+ON CONFLICT (topic_id, paper_id, chunk_type, chunk_index) DO UPDATE SET
+    text = EXCLUDED.text,
+    content_hash = EXCLUDED.content_hash,
+    source = EXCLUDED.source,
+    embedding_status = CASE
+        WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_status
+        ELSE 'pending'
+    END,
+    error_message = CASE
+        WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.error_message
+        ELSE NULL
+    END,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: DeleteStalePaperChunks :many
+DELETE FROM paper_chunks
+WHERE topic_id = $1
+  AND paper_id = $2
+  AND chunk_type = $3
+  AND chunk_index >= $4
+RETURNING *;
+
+-- name: GetPaperChunks :many
+SELECT * FROM paper_chunks
+WHERE topic_id = $1 AND paper_id = $2
+ORDER BY chunk_type, chunk_index;
+
+-- name: GetCompletedPaperChunks :many
+SELECT * FROM paper_chunks
+WHERE topic_id = $1
+  AND paper_id = $2
+  AND embedding_status = 'completed'
+ORDER BY chunk_type, chunk_index;
+
+-- name: UpdatePaperChunkEmbeddingStatus :one
+UPDATE paper_chunks
+SET embedding_status = $3,
+    error_message = $4,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2
+RETURNING *;
+
 -- name: CountPapersByTopic :one
 SELECT COUNT(*) FROM topic_papers WHERE topic_id = $1;
 

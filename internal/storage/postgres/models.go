@@ -62,6 +62,21 @@ type PaperAuthor struct {
 	Position int32     `json:"position"`
 }
 
+type PaperChunk struct {
+	ID              uuid.UUID          `json:"id"`
+	TopicID         uuid.UUID          `json:"topic_id"`
+	PaperID         uuid.UUID          `json:"paper_id"`
+	ChunkType       string             `json:"chunk_type"`
+	ChunkIndex      int32              `json:"chunk_index"`
+	Text            string             `json:"text"`
+	ContentHash     string             `json:"content_hash"`
+	Source          string             `json:"source"`
+	EmbeddingStatus string             `json:"embedding_status"`
+	ErrorMessage    pgtype.Text        `json:"error_message"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type PipelineRun struct {
 	ID           uuid.UUID          `json:"id"`
 	TopicID      uuid.UUID          `json:"topic_id"`

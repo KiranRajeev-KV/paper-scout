@@ -22,7 +22,9 @@ type Querier interface {
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
 	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
+	DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePaperChunksParams) ([]*PaperChunk, error)
 	FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error)
+	GetCompletedPaperChunks(ctx context.Context, arg GetCompletedPaperChunksParams) ([]*PaperChunk, error)
 	GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error)
 	GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error)
 	GetNextPaperAuthorPosition(ctx context.Context, paperID uuid.UUID) (int32, error)
@@ -31,6 +33,7 @@ type Querier interface {
 	GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error)
 	GetPaperAuthors(ctx context.Context, paperID uuid.UUID) ([]*Author, error)
 	GetPaperByExternalID(ctx context.Context, arg GetPaperByExternalIDParams) (*Paper, error)
+	GetPaperChunks(ctx context.Context, arg GetPaperChunksParams) ([]*PaperChunk, error)
 	GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID) ([]*Paper, error)
 	GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) ([]*Paper, error)
 	GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*Paper, error)
@@ -47,6 +50,7 @@ type Querier interface {
 	ListResearchTopics(ctx context.Context, arg ListResearchTopicsParams) ([]*ResearchTopic, error)
 	StartPipelineStage(ctx context.Context, arg StartPipelineStageParams) (*PipelineStageCheckpoint, error)
 	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error
+	UpdatePaperChunkEmbeddingStatus(ctx context.Context, arg UpdatePaperChunkEmbeddingStatusParams) (*PaperChunk, error)
 	UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePaperEmbeddingStatusParams) (*Paper, error)
 	UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFStatusParams) (*Paper, error)
 	UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error
@@ -56,6 +60,7 @@ type Querier interface {
 	UpdateResearchTopicStatus(ctx context.Context, arg UpdateResearchTopicStatusParams) (*ResearchTopic, error)
 	UpsertAuthorByName(ctx context.Context, name string) (*Author, error)
 	UpsertAuthorBySemanticScholarID(ctx context.Context, arg UpsertAuthorBySemanticScholarIDParams) (*Author, error)
+	UpsertPaperChunk(ctx context.Context, arg UpsertPaperChunkParams) (*PaperChunk, error)
 }
 
 var _ Querier = (*Queries)(nil)
