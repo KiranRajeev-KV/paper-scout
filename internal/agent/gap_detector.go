@@ -10,17 +10,26 @@ import (
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
+	"github.com/paper-scout/internal/tools/embedding"
 )
 
 type GapDetector struct {
 	postgres   *postgres.Client
 	structured *llm.StructuredOutput
+	embedder   *embedding.Generator
+	maxChunks  int
+	retrieveFn func(context.Context, string, string) []retrievedChunk
 }
 
-func NewGapDetector(llmClient *llm.Client, pg *postgres.Client) *GapDetector {
+func NewGapDetector(llmClient *llm.Client, pg *postgres.Client, embedder *embedding.Generator, maxChunks int) *GapDetector {
+	if maxChunks <= 0 {
+		maxChunks = 12
+	}
 	return &GapDetector{
 		postgres:   pg,
 		structured: llm.NewStructuredOutput(llmClient),
+		embedder:   embedder,
+		maxChunks:  maxChunks,
 	}
 }
 
@@ -60,7 +69,8 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 
 	logger.Info().Int("papers", len(papers)).Msg("Papers available for gap detection")
 
-	prompt := buildGapPrompt(topic, papers)
+	retrieved := g.retrieve(ctx, topicID, topic)
+	prompt := buildGapPrompt(topic, papers, retrieved)
 
 	var response gapDetectionResponse
 	if err := g.structured.GenerateInto(ctx, prompt, gapDetectionResponse{
@@ -96,7 +106,44 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 	return gaps, nil
 }
 
-func buildGapPrompt(topic string, papers []*postgres.GetPapersByTopicForAnalysisRow) string {
+func (g *GapDetector) retrieve(ctx context.Context, topicID, topic string) []retrievedChunk {
+	if g.retrieveFn != nil {
+		return g.retrieveFn(ctx, topicID, topic)
+	}
+	return g.retrieveChunks(ctx, topicID, topic)
+}
+
+type retrievedChunk struct {
+	PaperID string
+	Text    string
+	Score   float32
+}
+
+func (g *GapDetector) retrieveChunks(ctx context.Context, topicID, topic string) []retrievedChunk {
+	if g.embedder == nil {
+		return nil
+	}
+	vector, err := g.embedder.Generate(ctx, topic)
+	if err != nil {
+		logger.Warn().Err(err).Str("topic_id", topicID).Msg("Chunk retrieval embedding failed; using paper summaries")
+		return nil
+	}
+	results, err := g.embedder.SearchChunks(ctx, vector, uint64(g.maxChunks), topicID)
+	if err != nil {
+		logger.Warn().Err(err).Str("topic_id", topicID).Msg("Chunk retrieval failed; using paper summaries")
+		return nil
+	}
+	chunks := make([]retrievedChunk, 0, len(results))
+	for _, result := range results {
+		if result.Text == "" || result.PaperID == "" {
+			continue
+		}
+		chunks = append(chunks, retrievedChunk{PaperID: result.PaperID, Text: result.Text, Score: result.Score})
+	}
+	return chunks
+}
+
+func buildGapPrompt(topic string, papers []*postgres.GetPapersByTopicForAnalysisRow, retrieved ...[]retrievedChunk) string {
 	papersSummary := make([]string, 0, len(papers))
 	for i, p := range papers {
 		limitations := ""
@@ -110,11 +157,29 @@ func buildGapPrompt(topic string, papers []*postgres.GetPapersByTopicForAnalysis
 			i+1, truncateText(p.Title, 100), truncateText(limitations, 200)))
 	}
 
+	evidence := ""
+	if len(retrieved) > 0 && len(retrieved[0]) > 0 {
+		paperIndices := make(map[string]int, len(papers))
+		for index, paper := range papers {
+			paperIndices[paper.ID.String()] = index + 1
+		}
+		lines := make([]string, 0, len(retrieved[0]))
+		for _, chunk := range retrieved[0] {
+			if index, ok := paperIndices[chunk.PaperID]; ok {
+				lines = append(lines, fmt.Sprintf("paper %d: %q", index, truncateText(chunk.Text, 500)))
+			}
+		}
+		if len(lines) > 0 {
+			evidence = "\nRetrieved full-text evidence:\n" + strings.Join(lines, "\n")
+		}
+	}
+
 	return fmt.Sprintf(`Analyze these papers. Identify 3-5 research gaps.
 
 Topic: %s
 
 Papers:
+%s
 %s
 
 Return JSON only with this shape:
@@ -129,7 +194,7 @@ Return JSON only with this shape:
     }
   ]
 }
-Use only 1-based paper indices from the list. Do not generate or reconstruct UUIDs.`, topic, strings.Join(papersSummary, "\n"))
+Use only 1-based paper indices from the list. Do not generate or reconstruct UUIDs.`, topic, strings.Join(papersSummary, "\n"), evidence)
 }
 
 func (g *GapDetector) storeGap(ctx context.Context, topicID string, gap ResearchGap) error {

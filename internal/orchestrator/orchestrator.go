@@ -37,6 +37,7 @@ type Orchestrator struct {
 	paperDiscoverer *agent.PaperDiscoverer
 	ranker          *agent.Ranker
 	analyzer        *agent.Analyzer
+	indexer         *agent.Indexer
 	gapDetector     *agent.GapDetector
 	feasibility     *agent.FeasibilityEvaluator
 	reportGenerator *agent.ReportGenerator
@@ -151,12 +152,16 @@ func NewOrchestrator(
 	o.queryExpander = agent.NewQueryExpander(llmClient, pg)
 	o.paperDiscoverer = agent.NewPaperDiscoverer(ssClient, arxivClient, pg, cfg.Pipeline.MaxPapers)
 	o.ranker = agent.NewRanker(pg, embedder, llmClient)
-	o.analyzer = agent.NewAnalyzer(llmClient, pg, downloader, parser, pool)
-	processor := worker.NewProcessor(pg, downloader, parser, embedder, o.analyzer.HandleJob)
+	o.analyzer = agent.NewAnalyzer(llmClient, pg, pool)
+	o.indexer = agent.NewIndexer(pg, pool)
+	processor := worker.NewProcessor(pg, downloader, parser, embedder, o.analyzer.HandleJob, o.indexer, cfg.Pipeline.ChunkMaxWords, cfg.Pipeline.ChunkOverlap, cfg.Pipeline.EmbeddingBatchSize)
 	pool.SetHandler(processor.CreateHandler())
-	pool.SetCompletionHook(o.analyzer.HandleJobCompletion)
+	pool.SetCompletionHook(func(job worker.Job, err error, terminal bool) {
+		o.indexer.HandleJobCompletion(job, err, terminal)
+		o.analyzer.HandleJobCompletion(job, err, terminal)
+	})
 	pool.Start()
-	o.gapDetector = agent.NewGapDetector(llmClient, pg)
+	o.gapDetector = agent.NewGapDetector(llmClient, pg, embedder, cfg.Pipeline.MaxRetrievedChunks)
 	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
 	o.reportGenerator = agent.NewReportGenerator(pg)
 
@@ -548,6 +553,12 @@ func (o *Orchestrator) analyzePapers(ctx context.Context, topicID string, papers
 	total := len(analysisPapers)
 	if total == 0 {
 		return nil
+	}
+
+	indexCtx, cancel := context.WithTimeout(ctx, o.config.Pipeline.PDFIndexingTimeout)
+	defer cancel()
+	if err := o.indexer.Index(indexCtx, topicID, papers); err != nil {
+		return fmt.Errorf("index paper documents: %w", err)
 	}
 
 	return o.analyzer.Analyze(ctx, topicID, analysisPapers, func(completed, total int) {

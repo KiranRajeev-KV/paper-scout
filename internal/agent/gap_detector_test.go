@@ -24,6 +24,23 @@ func TestBuildGapPromptUsesStablePaperIndices(t *testing.T) {
 	}
 }
 
+func TestBuildGapPromptIncludesRetrievedChunkWithPaperIndex(t *testing.T) {
+	paper := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New(), Title: "Retrieved paper"}
+	prompt := buildGapPrompt("test topic", []*postgres.GetPapersByTopicForAnalysisRow{paper}, []retrievedChunk{{
+		PaperID: paper.ID.String(),
+		Text:    "The full-text result establishes a useful limitation.",
+	}})
+	if !strings.Contains(prompt, "Retrieved full-text evidence") {
+		t.Fatalf("prompt omitted retrieval section: %s", prompt)
+	}
+	if !strings.Contains(prompt, "paper 1:") || !strings.Contains(prompt, "useful limitation") {
+		t.Fatalf("prompt did not map retrieved evidence to paper index: %s", prompt)
+	}
+	if strings.Contains(prompt, paper.ID.String()) {
+		t.Fatalf("prompt leaked paper UUID: %s", prompt)
+	}
+}
+
 func TestResolveGapReferencesMapsFullUUIDs(t *testing.T) {
 	paperA := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New()}
 	paperB := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New()}

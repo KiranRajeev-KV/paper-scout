@@ -12,7 +12,6 @@ import (
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
-	"github.com/paper-scout/internal/tools/pdf"
 	"github.com/paper-scout/internal/worker"
 )
 
@@ -20,8 +19,6 @@ type Analyzer struct {
 	llm        *llm.Client
 	postgres   *postgres.Client
 	structured *llm.StructuredOutput
-	downloader *pdf.Downloader
-	parser     *pdf.GrobidClient
 	pool       *worker.Pool
 	mu         sync.Mutex
 	batches    map[string]*analysisBatch
@@ -31,13 +28,11 @@ type Analyzer struct {
 	generateFn func(ctx context.Context, prompt string) (string, error)
 }
 
-func NewAnalyzer(llmClient *llm.Client, pg *postgres.Client, dl *pdf.Downloader, parser *pdf.GrobidClient, pool *worker.Pool) *Analyzer {
+func NewAnalyzer(llmClient *llm.Client, pg *postgres.Client, pool *worker.Pool) *Analyzer {
 	analyzer := &Analyzer{
 		llm:        llmClient,
 		postgres:   pg,
 		structured: llm.NewStructuredOutput(llmClient),
-		downloader: dl,
-		parser:     parser,
 		pool:       pool,
 		batches:    make(map[string]*analysisBatch),
 		jobToBatch: make(map[string]string),
@@ -133,7 +128,7 @@ func (a *Analyzer) HandleJob(ctx context.Context, job worker.Job) error {
 		return fmt.Errorf("missing topic_id in job payload")
 	}
 
-	analysis, err := a.AnalyzeSync(ctx, paperID, job.GetString("abstract"), job.GetString("pdf_url"))
+	analysis, err := a.analyzeStoredPaper(ctx, topicID, paperID, job.GetString("abstract"), job.GetString("pdf_url"))
 	if err != nil {
 		return err
 	}
@@ -233,25 +228,37 @@ func (a *Analyzer) AnalyzeSync(ctx context.Context, paperID, abstract, pdfURL st
 }
 
 func (a *Analyzer) analyzeSync(ctx context.Context, paperID, abstract, pdfURL string) (*PaperAnalysis, error) {
-	var fullText string
+	_ = paperID
+	_ = pdfURL
+	return a.analyzeText(ctx, paperID, abstract)
+}
 
-	if pdfURL != "" {
-		filename, data, err := a.downloader.Download(ctx, pdfURL)
+func (a *Analyzer) analyzeStoredPaper(ctx context.Context, topicID, paperID, abstract, pdfURL string) (*PaperAnalysis, error) {
+	text := abstract
+	if a.postgres != nil {
+		chunks, err := a.postgres.Queries().GetCompletedPaperChunks(ctx, postgres.GetCompletedPaperChunksParams{
+			TopicID: pgUUID(topicID),
+			PaperID: pgUUID(paperID),
+		})
 		if err != nil {
-			logger.Warn().Err(err).Str("paper_id", paperID).Msg("PDF download failed, using abstract")
-		} else {
-			parseResp, err := a.parser.Parse(ctx, filename, data)
-			if err != nil {
-				logger.Warn().Err(err).Str("paper_id", paperID).Msg("PDF parse failed, using abstract")
-			} else {
-				fullText = a.parser.ExtractText(parseResp)
+			return nil, fmt.Errorf("load indexed paper chunks: %w", err)
+		}
+		if len(chunks) > 0 {
+			parts := make([]string, 0, len(chunks))
+			for _, chunk := range chunks {
+				parts = append(parts, chunk.Text)
 			}
+			text = strings.Join(parts, "\n\n")
 		}
 	}
 
-	if fullText == "" {
-		fullText = abstract
+	if text == abstract {
+		logger.Debug().Str("paper_id", paperID).Msg("No indexed PDF chunks available; using abstract")
 	}
+	return a.analyzeFn(ctx, paperID, text, pdfURL)
+}
+
+func (a *Analyzer) analyzeText(ctx context.Context, paperID, fullText string) (*PaperAnalysis, error) {
 
 	prompt := fmt.Sprintf(`Analyze this paper. Return JSON only. Do not include markdown or explanations.
 

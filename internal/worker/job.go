@@ -9,9 +9,10 @@ import (
 type Type string
 
 const (
-	TypePaperAnalysis Type = "paper_analysis"
-	TypePDFDownload   Type = "pdf_download"
-	TypeEmbedding     Type = "embedding"
+	TypePaperAnalysis  Type = "paper_analysis"
+	TypePDFDownload    Type = "pdf_download"
+	TypeEmbedding      Type = "embedding"
+	TypeEmbeddingBatch Type = "embedding_batch"
 )
 
 type Job struct {
@@ -102,4 +103,25 @@ func (j Job) GetStrings(key string) []string {
 		}
 	}
 	return nil
+}
+
+func (j Job) GetMaps(key string) []map[string]interface{} {
+	v, ok := j.Payload[key]
+	if !ok {
+		return nil
+	}
+	switch values := v.(type) {
+	case []map[string]interface{}:
+		return values
+	case []interface{}:
+		maps := make([]map[string]interface{}, 0, len(values))
+		for _, value := range values {
+			if item, ok := value.(map[string]interface{}); ok {
+				maps = append(maps, item)
+			}
+		}
+		return maps
+	default:
+		return nil
+	}
 }
