@@ -103,12 +103,12 @@ pipeline:
     max_backoff: 5s
     failure_threshold: 5
     open_timeout: 30s
+  chunk_max_words: 350
+  chunk_overlap: 50
+  max_retrieved_chunks: 12
+  pdf_indexing_timeout: 10m
+  embedding_batch_size: 10
   use_redis_queue: false
-
-cache:
-  default_ttl: 10m
-  search_ttl: 60m
-  embedding_ttl: 1440m
 
 logging:
   level: info

@@ -213,7 +213,7 @@ All defaults are in `config/default.yaml`. Override via environment variables us
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | `postgres` | `postgres:17-alpine` | 5432 | Primary database |
-| `redis` | `redis:8-alpine` | 6379 | Cache, pipeline state, job queue |
+| `redis` | `redis:8-alpine` | 6379 | Pipeline state and job queue |
 | `qdrant` | `qdrant/qdrant:latest` | 6333 | Vector database (768-dim, cosine) |
 | `grobid` | `lfoppiano/grobid:0.8.1` | 8070 | PDF parsing (TEI XML) |
 
@@ -272,7 +272,7 @@ records and streams.
 │   ├── storage/
 │   │   ├── postgres/        # PostgreSQL (pgx + sqlc)
 │   │   ├── qdrant/          # Vector database client
-│   │   └── redis/           # Cache, state, job queue
+│   │   └── redis/           # State and job queue
 │   ├── tools/
 │   │   ├── arxiv/           # arXiv API client
 │   │   ├── bibtex/          # BibTeX citation generator
@@ -291,7 +291,7 @@ records and streams.
 - **Language**: Go 1.24
 - **HTTP**: Gin
 - **Database**: PostgreSQL 17 (pgx/v5 + sqlc)
-- **Cache/Queue**: Redis 8
+- **Pipeline state/Queue**: Redis 8
 - **Vector DB**: Qdrant
 - **LLM**: Google Gemini (gemini-2.5-flash)
 - **Embeddings**: Gemini (gemini-embedding-001, 768-dim)

@@ -82,11 +82,19 @@ func (l LLMConfig) Validate() error {
 }
 
 func (p PipelineConfig) Validate() error {
+	if p.ChunkOverlap >= p.ChunkMaxWords && p.ChunkMaxWords > 0 {
+		return fmt.Errorf("chunk_overlap must be smaller than chunk_max_words")
+	}
 	return validation.ValidateStruct(&p,
 		validation.Field(&p.MaxPapers, validation.Required, validation.Min(1)),
 		validation.Field(&p.MinPapersForAnalysis, validation.Required, validation.Min(1)),
 		validation.Field(&p.WorkerPoolSize, validation.Required, validation.Min(1)),
 		validation.Field(&p.PDFMaxBytes, validation.Required, validation.Min(1)),
+		validation.Field(&p.ChunkMaxWords, validation.Required, validation.Min(1)),
+		validation.Field(&p.ChunkOverlap, validation.Min(0)),
+		validation.Field(&p.MaxRetrievedChunks, validation.Required, validation.Min(1)),
+		validation.Field(&p.PDFIndexingTimeout, validation.Required),
+		validation.Field(&p.EmbeddingBatchSize, validation.Required, validation.Min(1)),
 	)
 }
 
@@ -147,13 +155,5 @@ func (r RateLimitConfig) Validate() error {
 	return validation.ValidateStruct(&r,
 		validation.Field(&r.RequestsPerSecond, validation.Required, validation.Min(0.1)),
 		validation.Field(&r.Burst, validation.Required, validation.Min(1)),
-	)
-}
-
-func (c CacheConfig) Validate() error {
-	return validation.ValidateStruct(&c,
-		validation.Field(&c.DefaultTTL, validation.Required),
-		validation.Field(&c.SearchTTL, validation.Required),
-		validation.Field(&c.EmbeddingTTL, validation.Required),
 	)
 }

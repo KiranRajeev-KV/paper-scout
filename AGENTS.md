@@ -259,24 +259,26 @@ Pipeline recovery is checkpointed in Postgres: each run has a durable run ID and
 - Supports graceful shutdown via context
 - Easy to monitor queue depth
 
+PDF chunk embeddings are submitted as bounded batch jobs. A batch makes one
+Gemini embedding request and one Qdrant bulk upsert, while PostgreSQL records
+the status of every chunk transactionally. This keeps the worker pool bounded
+without turning every chunk into a separate rate-limited API call.
+
 **Why not unbounded goroutines:**
 - Can spawn thousands, causing memory bloat
 - No backpressure mechanism
 - Can overwhelm external APIs
 
-### 7. Caching: Redis (TTL-based)
+### 7. Redis: Pipeline State and Job Queue
 
-**Decision:** Redis for all caching with configurable TTLs.
+**Decision:** Do not maintain an application-level Redis cache. Redis is used
+only for transient pipeline state and the optional Redis Streams job queue;
+PostgreSQL and Qdrant are the authoritative stores for research data and
+embeddings.
 
-**Cache Keys:**
-- `cache:paper:{source}:{external_id}` - Paper metadata
-- `cache:embedding:{hash}` - Embedding vectors
-- `cache:search:{query_hash}` - Search results
-
-**TTLs:**
-- Default: 24h
-- Search results: 1h
-- Embeddings: 168h (1 week)
+**Rationale:** Cached metadata and embeddings had no production callers and
+obscured the durable ownership model. Removing the unused abstraction makes the
+runtime behavior and recovery guarantees explicit.
 
 ### 8. Observability: Structured Logging Only
 
@@ -648,7 +650,6 @@ clean:
 
 ### Phase 3: Infrastructure
 - [x] internal/storage/redis/client.go
-- [x] internal/storage/redis/cache.go
 - [x] internal/storage/redis/queue.go
 - [x] internal/storage/qdrant/client.go
 

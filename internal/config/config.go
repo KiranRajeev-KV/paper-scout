@@ -18,7 +18,6 @@ type Config struct {
 	LLM      LLMConfig      `koanf:"llm"`
 	APIs     APIsConfig     `koanf:"apis"`
 	Pipeline PipelineConfig `koanf:"pipeline"`
-	Cache    CacheConfig    `koanf:"cache"`
 	Logging  LoggingConfig  `koanf:"logging"`
 }
 
@@ -145,13 +144,12 @@ type PipelineConfig struct {
 	PDFMaxBytes          int64            `koanf:"pdf_max_bytes"`
 	PDFRateLimit         RateLimitConfig  `koanf:"pdf_rate_limit"`
 	PDFResilience        ResilienceConfig `koanf:"pdf_resilience"`
+	ChunkMaxWords        int              `koanf:"chunk_max_words"`
+	ChunkOverlap         int              `koanf:"chunk_overlap"`
+	MaxRetrievedChunks   int              `koanf:"max_retrieved_chunks"`
+	PDFIndexingTimeout   time.Duration    `koanf:"pdf_indexing_timeout"`
+	EmbeddingBatchSize   int              `koanf:"embedding_batch_size"`
 	UseRedisQueue        bool             `koanf:"use_redis_queue"`
-}
-
-type CacheConfig struct {
-	DefaultTTL   time.Duration `koanf:"default_ttl"`
-	SearchTTL    time.Duration `koanf:"search_ttl"`
-	EmbeddingTTL time.Duration `koanf:"embedding_ttl"`
 }
 
 type LoggingConfig struct {
