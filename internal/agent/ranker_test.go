@@ -88,6 +88,30 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	}
 }
 
+func TestParseRerankResponseValidatesScores(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "out of range", body: `{"scores":[{"index":1,"score":1.1}]}`},
+		{name: "duplicate index", body: `{"scores":[{"index":1,"score":0.5},{"index":1,"score":0.4}]}`},
+		{name: "zero index", body: `{"scores":[{"index":0,"score":0.5}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseRerankResponse(tt.body); err == nil {
+				t.Fatal("parseRerankResponse accepted invalid scores")
+			}
+		})
+	}
+
+	valid := `{"scores":[{"index":1,"score":0.5,"reason":"relevant"}]}`
+	if _, err := parseRerankResponse(valid); err != nil {
+		t.Fatalf("parseRerankResponse rejected valid scores: %v", err)
+	}
+}
+
 func TestRankerRankDeduplicatesQdrantResultsByPaper(t *testing.T) {
 	paper := testPaper("paper-a", "Alpha", "alpha abstract")
 

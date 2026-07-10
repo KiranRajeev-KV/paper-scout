@@ -405,5 +405,19 @@ func parseRerankResponse(result string) ([]scoreEntry, error) {
 		return nil, fmt.Errorf("no scores in response")
 	}
 
+	seen := make(map[int]struct{}, len(response.Scores))
+	for _, score := range response.Scores {
+		if score.Index < 1 {
+			return nil, fmt.Errorf("score index must be positive: %d", score.Index)
+		}
+		if score.Score < 0 || score.Score > 1 {
+			return nil, fmt.Errorf("score for index %d is outside [0,1]: %g", score.Index, score.Score)
+		}
+		if _, ok := seen[score.Index]; ok {
+			return nil, fmt.Errorf("duplicate score index: %d", score.Index)
+		}
+		seen[score.Index] = struct{}{}
+	}
+
 	return response.Scores, nil
 }
