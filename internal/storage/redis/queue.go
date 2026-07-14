@@ -21,9 +21,10 @@ const (
 type JobType string
 
 const (
-	JobTypePaperAnalysis JobType = "paper_analysis"
-	JobTypePDFDownload   JobType = "pdf_download"
-	JobTypeEmbedding     JobType = "embedding"
+	JobTypePaperAnalysis  JobType = "paper_analysis"
+	JobTypePDFDownload    JobType = "pdf_download"
+	JobTypeEmbedding      JobType = "embedding"
+	JobTypeEmbeddingBatch JobType = "embedding_batch"
 )
 
 type Job struct {
@@ -35,6 +36,9 @@ type Job struct {
 	CreatedAt time.Time              `json:"created_at"`
 	Retries   int                    `json:"retries"`
 	MaxRetry  int                    `json:"max_retry"`
+	RunID     string                 `json:"run_id,omitempty"`
+	TopicID   string                 `json:"topic_id,omitempty"`
+	TraceID   string                 `json:"trace_id,omitempty"`
 	StreamID  string                 `json:"-"`
 }
 
@@ -51,14 +55,15 @@ type QueueOptions struct {
 }
 
 type Queue struct {
-	client       *goredis.Client
-	stream       string
-	group        string
-	claimIdle    time.Duration
-	reclaimCount int64
+	controlClient *goredis.Client
+	workerClient  *goredis.Client
+	stream        string
+	group         string
+	claimIdle     time.Duration
+	reclaimCount  int64
 }
 
-func NewQueue(client *goredis.Client, opts QueueOptions) *Queue {
+func NewQueue(controlClient, workerClient *goredis.Client, opts QueueOptions) *Queue {
 	if opts.Stream == "" {
 		opts.Stream = JobQueueStream
 	}
@@ -73,16 +78,17 @@ func NewQueue(client *goredis.Client, opts QueueOptions) *Queue {
 	}
 
 	return &Queue{
-		client:       client,
-		stream:       opts.Stream,
-		group:        opts.Group,
-		claimIdle:    opts.ClaimIdle,
-		reclaimCount: opts.ReclaimCount,
+		controlClient: controlClient,
+		workerClient:  workerClient,
+		stream:        opts.Stream,
+		group:         opts.Group,
+		claimIdle:     opts.ClaimIdle,
+		reclaimCount:  opts.ReclaimCount,
 	}
 }
 
 func (q *Queue) EnsureGroup(ctx context.Context) error {
-	err := q.client.XGroupCreateMkStream(ctx, q.stream, q.group, "0").Err()
+	err := q.controlClient.XGroupCreateMkStream(ctx, q.stream, q.group, "0").Err()
 	if err == nil {
 		return nil
 	}
@@ -93,17 +99,15 @@ func (q *Queue) EnsureGroup(ctx context.Context) error {
 }
 
 func (q *Queue) Enqueue(ctx context.Context, job Job) error {
-	job.CreatedAt = time.Now()
-	if job.MaxRetry == 0 {
-		job.MaxRetry = 3
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now()
 	}
-
 	data, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("failed to marshal job: %w", err)
 	}
 
-	if _, err := q.client.XAdd(ctx, &goredis.XAddArgs{
+	if _, err := q.controlClient.XAdd(ctx, &goredis.XAddArgs{
 		Stream: q.stream,
 		Values: map[string]interface{}{
 			"job": string(data),
@@ -127,7 +131,7 @@ func (q *Queue) Dequeue(ctx context.Context, consumer string, timeout time.Durat
 		return job, nil
 	}
 
-	streams, err := q.client.XReadGroup(ctx, &goredis.XReadGroupArgs{
+	streams, err := q.workerClient.XReadGroup(ctx, &goredis.XReadGroupArgs{
 		Group:    q.group,
 		Consumer: consumer,
 		Streams:  []string{q.stream, ">"},
@@ -149,7 +153,7 @@ func (q *Queue) Complete(ctx context.Context, streamID string) error {
 		return fmt.Errorf("missing stream id")
 	}
 
-	pipe := q.client.TxPipeline()
+	pipe := q.controlClient.TxPipeline()
 	pipe.XAck(ctx, q.stream, q.group, streamID)
 	pipe.XDel(ctx, q.stream, streamID)
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -163,7 +167,7 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, e
 		return FailResult{}, fmt.Errorf("missing stream id")
 	}
 
-	pipe := q.client.TxPipeline()
+	pipe := q.controlClient.TxPipeline()
 	pipe.XAck(ctx, q.stream, q.group, job.StreamID)
 	pipe.XDel(ctx, q.stream, job.StreamID)
 
@@ -189,11 +193,14 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, e
 			Msg("Job failed, requeueing")
 		result.Requeued = true
 	} else {
-		failedData, _ := json.Marshal(map[string]interface{}{
+		failedData, err := json.Marshal(map[string]interface{}{
 			"job":   job,
 			"error": errMsg,
 			"at":    time.Now(),
 		})
+		if err != nil {
+			return FailResult{}, fmt.Errorf("marshal dead-letter job: %w", err)
+		}
 		pipe.RPush(ctx, JobQueueDeadLetter, failedData)
 
 		logger.Error().
@@ -211,11 +218,23 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, e
 }
 
 func (q *Queue) QueueDepth(ctx context.Context) (int64, error) {
-	return q.client.XLen(ctx, q.stream).Result()
+	total, err := q.controlClient.XLen(ctx, q.stream).Result()
+	if err != nil {
+		return 0, err
+	}
+	processing, err := q.ProcessingCount(ctx)
+	if err != nil {
+		return 0, err
+	}
+	ready := total - processing
+	if ready < 0 {
+		return 0, nil
+	}
+	return ready, nil
 }
 
 func (q *Queue) ProcessingCount(ctx context.Context) (int64, error) {
-	summary, err := q.client.XPending(ctx, q.stream, q.group).Result()
+	summary, err := q.controlClient.XPending(ctx, q.stream, q.group).Result()
 	if err != nil {
 		if isNoGroupErr(err) {
 			return 0, nil
@@ -226,15 +245,15 @@ func (q *Queue) ProcessingCount(ctx context.Context) (int64, error) {
 }
 
 func (q *Queue) FailedCount(ctx context.Context) (int64, error) {
-	return q.client.LLen(ctx, JobQueueDeadLetter).Result()
+	return q.controlClient.LLen(ctx, JobQueueDeadLetter).Result()
 }
 
 func (q *Queue) ClearFailed(ctx context.Context) error {
-	return q.client.Del(ctx, JobQueueDeadLetter).Err()
+	return q.controlClient.Del(ctx, JobQueueDeadLetter).Err()
 }
 
 func (q *Queue) claimStale(ctx context.Context, consumer string) (*Job, error) {
-	messages, _, err := q.client.XAutoClaim(ctx, &goredis.XAutoClaimArgs{
+	messages, _, err := q.controlClient.XAutoClaim(ctx, &goredis.XAutoClaimArgs{
 		Stream:   q.stream,
 		Group:    q.group,
 		Consumer: consumer,

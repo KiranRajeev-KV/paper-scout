@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/paper-scout/internal/worker"
 )
 
+// Protects indexer terminal failures complete batch.
 func TestIndexerTerminalFailuresCompleteBatch(t *testing.T) {
 	indexer := NewIndexer(nil, nil)
 	batchID := "batch"
@@ -29,7 +31,19 @@ func TestIndexerTerminalFailuresCompleteBatch(t *testing.T) {
 	default:
 		t.Fatal("terminal failures did not finish indexing batch")
 	}
-	if batch.failures != 2 || batch.completed != 2 {
+	if len(batch.failures) != 2 || batch.completed != 2 {
 		t.Fatalf("batch = %+v, want two terminal failures", batch)
+	}
+
+	err := indexer.wait(context.Background(), batchID)
+	var batchErr *BatchError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("wait error = %v, want *BatchError", err)
+	}
+	if batchErr.Total != 2 || batchErr.Succeeded != 0 || len(batchErr.Failures) != 2 {
+		t.Fatalf("batch error = %#v, want two terminal failures", batchErr)
+	}
+	if !strings.Contains(batchErr.Error(), "embedding unavailable") {
+		t.Fatalf("batch error = %q, want underlying cause", batchErr.Error())
 	}
 }

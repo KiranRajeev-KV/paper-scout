@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -12,20 +13,22 @@ import (
 )
 
 type Pool struct {
-	workers     int
-	jobQueue    chan Job
-	handler     JobHandler
-	hook        CompletionHook
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
-	started     bool
-	mu          sync.Mutex
-	metrics     *Metrics
-	redisQueue  RedisQueue
-	useRedis    bool
-	pollTimeout time.Duration
-	consumerKey string
+	workers         int
+	jobQueue        chan Job
+	handler         JobHandler
+	hook            CompletionHook
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	started         bool
+	mu              sync.Mutex
+	metrics         *Metrics
+	redisQueue      RedisQueue
+	useRedis        bool
+	pollTimeout     time.Duration
+	consumerKey     string
+	decorateContext func(context.Context, Job) context.Context
+	decorateJob     func(Job) Job
 }
 
 type JobHandler func(ctx context.Context, job Job) error
@@ -41,11 +44,24 @@ type RedisQueue interface {
 }
 
 type Metrics struct {
-	JobsProcessed int64
-	JobsFailed    int64
-	JobsQueued    int64
-	ActiveWorkers int
-	mu            sync.RWMutex
+	JobsProcessed         int64
+	JobAttemptsFailed     int64
+	JobsRetried           int64
+	JobsTerminallyFailed  int64
+	JobStateWriteFailures int64
+	JobsQueued            int64
+	ActiveWorkers         int
+	mu                    sync.RWMutex
+}
+
+type MetricsSnapshot struct {
+	JobsProcessed         int64
+	JobAttemptsFailed     int64
+	JobsRetried           int64
+	JobsTerminallyFailed  int64
+	JobStateWriteFailures int64
+	JobsQueued            int64
+	ActiveWorkers         int
 }
 
 func (m *Metrics) RecordProcessed() {
@@ -54,10 +70,28 @@ func (m *Metrics) RecordProcessed() {
 	m.JobsProcessed++
 }
 
-func (m *Metrics) RecordFailed() {
+func (m *Metrics) RecordFailedAttempt() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.JobsFailed++
+	m.JobAttemptsFailed++
+}
+
+func (m *Metrics) RecordRetry() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.JobsRetried++
+}
+
+func (m *Metrics) RecordTerminalFailure() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.JobsTerminallyFailed++
+}
+
+func (m *Metrics) RecordStateWriteFailure() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.JobStateWriteFailures++
 }
 
 func (m *Metrics) SetQueued(count int64) {
@@ -72,10 +106,18 @@ func (m *Metrics) AddActive(delta int) {
 	m.ActiveWorkers += delta
 }
 
-func (m *Metrics) Snapshot() (processed, failed, queued int64, active int) {
+func (m *Metrics) Snapshot() MetricsSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.JobsProcessed, m.JobsFailed, m.JobsQueued, m.ActiveWorkers
+	return MetricsSnapshot{
+		JobsProcessed:         m.JobsProcessed,
+		JobAttemptsFailed:     m.JobAttemptsFailed,
+		JobsRetried:           m.JobsRetried,
+		JobsTerminallyFailed:  m.JobsTerminallyFailed,
+		JobStateWriteFailures: m.JobStateWriteFailures,
+		JobsQueued:            m.JobsQueued,
+		ActiveWorkers:         m.ActiveWorkers,
+	}
 }
 
 func NewPool(workers int, queueSize int) *Pool {
@@ -118,21 +160,36 @@ func (p *Pool) SetCompletionHook(hook CompletionHook) {
 	p.hook = hook
 }
 
-func (p *Pool) Start() {
+func (p *Pool) SetContextDecorator(decorator func(context.Context, Job) context.Context) {
+	p.decorateContext = decorator
+}
+
+// SetJobDecorator installs immutable correlation metadata before a job enters either queue.
+func (p *Pool) SetJobDecorator(decorator func(Job) Job) {
+	p.decorateJob = decorator
+}
+
+func (p *Pool) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.started {
-		return
+		return nil
+	}
+	if p.workers < 1 {
+		return fmt.Errorf("worker pool size must be positive")
 	}
 
 	if p.handler == nil {
-		panic("worker pool: handler not set")
+		return fmt.Errorf("worker pool handler is not set")
 	}
 
 	if p.useRedis {
+		if p.redisQueue == nil {
+			return fmt.Errorf("Redis worker queue is not configured")
+		}
 		if err := p.redisQueue.EnsureGroup(p.ctx); err != nil {
-			panic(fmt.Sprintf("worker pool: failed to ensure redis consumer group: %v", err))
+			return fmt.Errorf("ensure Redis worker consumer group: %w", err)
 		}
 	}
 
@@ -147,6 +204,7 @@ func (p *Pool) Start() {
 		Int("workers", p.workers).
 		Bool("use_redis", p.useRedis).
 		Msg("Worker pool started")
+	return nil
 }
 
 func (p *Pool) worker(id int) {
@@ -169,6 +227,7 @@ func (p *Pool) localWorker(id int) {
 			if !ok {
 				return
 			}
+			p.metrics.SetQueued(int64(len(p.jobQueue)))
 			p.processJob(id, job)
 		}
 	}
@@ -195,14 +254,7 @@ func (p *Pool) redisWorker(id int) {
 			continue
 		}
 
-		workerJob := Job{
-			ID:       job.ID,
-			Type:     Type(job.Type),
-			Payload:  job.Payload,
-			Timeout:  job.Timeout,
-			Retries:  job.Retries,
-			MaxRetry: job.MaxRetry,
-		}
+		workerJob := fromRedisJob(*job)
 
 		if workerJob.Timeout <= 0 {
 			workerJob.Timeout = 10 * time.Minute
@@ -219,10 +271,11 @@ func (p *Pool) processJobWithRedisTracking(workerID int, job Job, redisJob *redi
 	p.metrics.AddActive(1)
 	defer p.metrics.AddActive(-1)
 
-	ctx, cancel := context.WithTimeout(p.ctx, job.Timeout)
+	base := p.pctx(job)
+	ctx, cancel := context.WithTimeout(base, job.Timeout)
 	defer cancel()
 
-	logger.Debug().
+	logger.From(ctx).Debug().
 		Int("worker_id", workerID).
 		Str("job_id", job.ID).
 		Str("job_type", string(job.Type)).
@@ -233,8 +286,8 @@ func (p *Pool) processJobWithRedisTracking(workerID int, job Job, redisJob *redi
 	duration := time.Since(start)
 
 	if err != nil {
-		p.metrics.RecordFailed()
-		logger.Error().
+		p.metrics.RecordFailedAttempt()
+		logger.From(ctx).Error().
 			Err(err).
 			Str("job_id", job.ID).
 			Dur("duration", duration).
@@ -243,40 +296,51 @@ func (p *Pool) processJobWithRedisTracking(workerID int, job Job, redisJob *redi
 		failedJob := p.jobToRedisJob(job, redisJob)
 		failure, failErr := p.redisQueue.Fail(p.ctx, *failedJob, err.Error())
 		if failErr != nil {
-			logger.Warn().Err(failErr).Msg("Failed to mark job as failed in Redis")
-			failure.Terminal = job.Retries+1 >= job.MaxRetry
+			p.metrics.RecordStateWriteFailure()
+			logger.From(ctx).Warn().Err(failErr).Msg("Failed to mark job as failed in Redis")
+			p.refreshRedisQueueDepth()
+			return errors.Join(err, fmt.Errorf("persist Redis job failure: %w", failErr))
 		}
+		if failure.Requeued {
+			p.metrics.RecordRetry()
+		}
+		if failure.Terminal {
+			p.metrics.RecordTerminalFailure()
+		}
+		logger.From(ctx).Warn().
+			Str("job_id", job.ID).
+			Int("attempt", job.Retries+1).
+			Int("max_attempts", job.MaxRetry).
+			Bool("terminal", failure.Terminal).
+			Msg("Job attempt finished with failure")
 		p.notifyCompletion(job, err, failure.Terminal)
+		p.refreshRedisQueueDepth()
 		return err
 	}
 
+	if completeErr := p.redisQueue.Complete(p.ctx, redisJob.StreamID); completeErr != nil {
+		logger.From(ctx).Warn().Err(completeErr).Msg("Failed to mark job as complete in Redis")
+		p.metrics.RecordStateWriteFailure()
+		p.refreshRedisQueueDepth()
+		return fmt.Errorf("persist Redis job completion: %w", completeErr)
+	}
+
 	p.metrics.RecordProcessed()
-	logger.Debug().
+	logger.From(ctx).Debug().
 		Str("job_id", job.ID).
 		Dur("duration", duration).
 		Msg("Job completed")
-
-	if completeErr := p.redisQueue.Complete(p.ctx, redisJob.StreamID); completeErr != nil {
-		logger.Warn().Err(completeErr).Msg("Failed to mark job as complete in Redis")
-	}
-
 	p.notifyCompletion(job, nil, true)
+	p.refreshRedisQueueDepth()
 
 	return nil
 }
 
 func (p *Pool) jobToRedisJob(job Job, source *redis.Job) *redis.Job {
-	return &redis.Job{
-		ID:        job.ID,
-		Type:      redis.JobType(job.Type),
-		Payload:   job.Payload,
-		Priority:  job.Priority,
-		Timeout:   job.Timeout,
-		CreatedAt: source.CreatedAt,
-		Retries:   job.Retries,
-		MaxRetry:  job.MaxRetry,
-		StreamID:  source.StreamID,
-	}
+	converted := toRedisJob(job)
+	converted.CreatedAt = source.CreatedAt
+	converted.StreamID = source.StreamID
+	return &converted
 }
 
 func (p *Pool) processJob(workerID int, job Job) {
@@ -284,10 +348,11 @@ func (p *Pool) processJob(workerID int, job Job) {
 	p.metrics.AddActive(1)
 	defer p.metrics.AddActive(-1)
 
-	ctx, cancel := context.WithTimeout(p.ctx, job.Timeout)
+	base := p.pctx(job)
+	ctx, cancel := context.WithTimeout(base, job.Timeout)
 	defer cancel()
 
-	logger.Debug().
+	logger.From(ctx).Debug().
 		Int("worker_id", workerID).
 		Str("job_id", job.ID).
 		Str("job_type", string(job.Type)).
@@ -298,21 +363,29 @@ func (p *Pool) processJob(workerID int, job Job) {
 	duration := time.Since(start)
 
 	if err != nil {
-		p.metrics.RecordFailed()
-		logger.Error().
+		p.metrics.RecordFailedAttempt()
+		p.metrics.RecordTerminalFailure()
+		logger.From(ctx).Error().
 			Err(err).
 			Str("job_id", job.ID).
 			Dur("duration", duration).
 			Msg("Job failed")
 	} else {
 		p.metrics.RecordProcessed()
-		logger.Debug().
+		logger.From(ctx).Debug().
 			Str("job_id", job.ID).
 			Dur("duration", duration).
 			Msg("Job completed")
 	}
 
 	p.notifyCompletion(job, err, true)
+}
+
+func (p *Pool) pctx(job Job) context.Context {
+	if p.decorateContext != nil {
+		return p.decorateContext(p.ctx, job)
+	}
+	return p.ctx
 }
 
 func (p *Pool) notifyCompletion(job Job, err error, terminal bool) {
@@ -334,7 +407,12 @@ func (p *Pool) Submit(job Job) error {
 		if err := p.ctx.Err(); err != nil {
 			return err
 		}
-		p.Start()
+		if err := p.Start(); err != nil {
+			return err
+		}
+	}
+	if p.decorateJob != nil {
+		job = p.decorateJob(job)
 	}
 
 	if p.useRedis {
@@ -355,15 +433,7 @@ func (p *Pool) submitLocal(job Job) error {
 }
 
 func (p *Pool) submitToRedis(job Job) error {
-	redisJob := redis.Job{
-		ID:        job.ID,
-		Type:      redis.JobType(job.Type),
-		Payload:   job.Payload,
-		Priority:  0,
-		CreatedAt: time.Now(),
-		Retries:   0,
-		MaxRetry:  3,
-	}
+	redisJob := toRedisJob(job)
 
 	if err := p.redisQueue.Enqueue(p.ctx, redisJob); err != nil {
 		return err
@@ -375,6 +445,31 @@ func (p *Pool) submitToRedis(job Job) error {
 	}
 
 	return nil
+}
+
+func toRedisJob(job Job) redis.Job {
+	return redis.Job{
+		ID: job.ID, Type: redis.JobType(job.Type), Payload: job.Payload, Priority: job.Priority,
+		Timeout: job.Timeout, CreatedAt: job.CreatedAt, Retries: job.Retries, MaxRetry: job.MaxRetry,
+		RunID: job.RunID, TopicID: job.TopicID, TraceID: job.TraceID,
+	}
+}
+
+func fromRedisJob(job redis.Job) Job {
+	return Job{
+		ID: job.ID, Type: Type(job.Type), Payload: job.Payload, Priority: job.Priority,
+		Timeout: job.Timeout, CreatedAt: job.CreatedAt, Retries: job.Retries, MaxRetry: job.MaxRetry,
+		RunID: job.RunID, TopicID: job.TopicID, TraceID: job.TraceID,
+	}
+}
+
+func (p *Pool) refreshRedisQueueDepth() {
+	if !p.useRedis {
+		return
+	}
+	if queued, err := p.redisQueue.QueueDepth(p.ctx); err == nil {
+		p.metrics.SetQueued(queued)
+	}
 }
 
 func (p *Pool) Stop() {
@@ -414,7 +509,7 @@ func (p *Pool) StopAndWait(timeout time.Duration) {
 	}
 }
 
-func (p *Pool) GetMetrics() (processed, failed, queued int64, active int) {
+func (p *Pool) GetMetrics() MetricsSnapshot {
 	return p.metrics.Snapshot()
 }
 
