@@ -125,12 +125,6 @@ UPDATE topic_papers
 SET relevance_score = $3, updated_at = NOW()
 WHERE topic_id = $1 AND paper_id = $2;
 
--- name: UpdatePaperEmbeddingStatus :one
-UPDATE papers 
-SET embedding_status = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING *;
-
 -- name: UpdatePaperPDFStatus :one
 UPDATE papers 
 SET pdf_downloaded = $2, pdf_parsed = $3, updated_at = NOW()
@@ -140,17 +134,26 @@ RETURNING *;
 -- name: UpsertPaperChunk :one
 INSERT INTO paper_chunks (
     topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source,
-    embedding_status, error_message
+    embedding_status, error_message, section_heading
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL, $8)
 ON CONFLICT (topic_id, paper_id, chunk_type, chunk_index) DO UPDATE SET
     text = EXCLUDED.text,
     content_hash = EXCLUDED.content_hash,
     source = EXCLUDED.source,
+    section_heading = EXCLUDED.section_heading,
     embedding_status = CASE
         WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_status
         ELSE 'pending'
     END,
+	 embedded_content_hash = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedded_content_hash ELSE NULL END,
+	 embedding_provider = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_provider ELSE NULL END,
+	 embedding_model = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_model ELSE NULL END,
+	 embedding_dimensions = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_dimensions ELSE NULL END,
+	 embedding_instruction_version = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_instruction_version ELSE NULL END,
+	 embedding_indexing_version = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_indexing_version ELSE NULL END,
+	 qdrant_collection = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.qdrant_collection ELSE NULL END,
+	 qdrant_point_id = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.qdrant_point_id ELSE NULL END,
     error_message = CASE
         WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.error_message
         ELSE NULL
@@ -186,6 +189,130 @@ SET embedding_status = $3,
 WHERE topic_id = $1 AND id = $2
 RETURNING *;
 
+-- name: MarkPaperChunkEmbeddingIndexing :one
+UPDATE paper_chunks
+SET embedding_status = 'indexing',
+    embedding_provider = $3,
+    embedding_model = $4,
+    embedding_dimensions = $5,
+    embedding_instruction_version = $6,
+    embedding_indexing_version = $7,
+    qdrant_collection = $8,
+    qdrant_point_id = $9,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2
+RETURNING *;
+
+-- name: CompletePaperChunkEmbedding :one
+UPDATE paper_chunks
+SET embedding_status = 'completed',
+    embedded_content_hash = content_hash,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2 AND qdrant_point_id = $3
+RETURNING *;
+
+-- name: ListPaperChunksForReindex :many
+SELECT * FROM paper_chunks
+ORDER BY topic_id, paper_id, chunk_type, chunk_index;
+
+-- name: LockPaperChunksForEmbeddingActivation :exec
+LOCK TABLE paper_chunks IN SHARE ROW EXCLUSIVE MODE;
+
+-- name: CreateEmbeddingGeneration :one
+INSERT INTO embedding_generations (
+    provider, model, dimensions, instruction_version, indexing_version, collection_name, status
+) VALUES ($1, $2, $3, $4, $5, $6, 'building')
+ON CONFLICT (provider, model, dimensions, instruction_version, indexing_version) DO UPDATE SET
+    collection_name = EXCLUDED.collection_name,
+    status = CASE WHEN embedding_generations.status = 'active' THEN 'active' ELSE 'building' END,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: GetActiveEmbeddingGeneration :one
+SELECT * FROM embedding_generations WHERE status = 'active';
+
+-- name: GetEmbeddingGenerationByIdentity :one
+SELECT * FROM embedding_generations
+WHERE provider = $1 AND model = $2 AND dimensions = $3
+  AND instruction_version = $4 AND indexing_version = $5;
+
+-- name: UpdateEmbeddingGenerationProgress :one
+UPDATE embedding_generations SET indexed_chunks = $2, error_message = $3, updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: RetireActiveEmbeddingGenerations :exec
+UPDATE embedding_generations SET status = 'retired', updated_at = NOW()
+WHERE status = 'active' AND id <> $1;
+
+-- name: ActivateEmbeddingGeneration :one
+UPDATE embedding_generations
+SET status = 'active', activated_at = COALESCE(activated_at, NOW()), error_message = NULL, updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: MarkPaperChunkForActiveGeneration :one
+UPDATE paper_chunks
+SET embedding_status = 'completed',
+    embedded_content_hash = content_hash,
+    embedding_provider = $4,
+    embedding_model = $5,
+    embedding_dimensions = $6,
+    embedding_instruction_version = $7,
+    embedding_indexing_version = $8,
+    qdrant_collection = $9,
+    qdrant_point_id = $10,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2 AND content_hash = $3
+RETURNING *;
+
+-- name: CreateEmbeddingCleanupTask :one
+INSERT INTO embedding_cleanup_tasks (collection_name, point_id, topic_id, paper_id, chunk_id, reason)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (collection_name, point_id) DO UPDATE SET
+    status = CASE WHEN embedding_cleanup_tasks.status = 'completed' THEN 'completed' ELSE 'pending' END,
+    reason = EXCLUDED.reason,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: ListPendingEmbeddingCleanupTasks :many
+SELECT * FROM embedding_cleanup_tasks
+WHERE status IN ('pending', 'failed')
+ORDER BY created_at LIMIT $1;
+
+-- name: CompleteEmbeddingCleanupTask :one
+UPDATE embedding_cleanup_tasks
+SET status = 'completed', attempts = attempts + 1, error_message = NULL, completed_at = NOW(), updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: FailEmbeddingCleanupTask :one
+UPDATE embedding_cleanup_tasks
+SET status = 'failed', attempts = attempts + 1, error_message = $2, updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: UpsertPaperDocument :one
+INSERT INTO paper_documents (
+    paper_id, pdf_hash, parser_provider, parser_version, status, duration_ms, warnings, error_message, markdown, parser_json
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (paper_id) DO UPDATE SET
+    pdf_hash = EXCLUDED.pdf_hash,
+    parser_provider = EXCLUDED.parser_provider,
+    parser_version = EXCLUDED.parser_version,
+    status = EXCLUDED.status,
+    duration_ms = EXCLUDED.duration_ms,
+    warnings = EXCLUDED.warnings,
+    error_message = EXCLUDED.error_message,
+    markdown = EXCLUDED.markdown,
+    parser_json = EXCLUDED.parser_json,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: GetPaperDocument :one
+SELECT * FROM paper_documents WHERE paper_id = $1;
+
 -- name: CountPapersByTopic :one
 SELECT COUNT(*) FROM topic_papers WHERE topic_id = $1;
 
@@ -212,21 +339,6 @@ SELECT a.* FROM authors a
 JOIN paper_authors pa ON a.id = pa.author_id
 WHERE pa.paper_id = $1
 ORDER BY pa.position;
-
--- name: AddCitation :exec
-INSERT INTO citations (citing_paper_id, cited_paper_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
-
--- name: GetPaperCitations :many
-SELECT p.* FROM papers p
-JOIN citations c ON p.id = c.cited_paper_id
-WHERE c.citing_paper_id = $1;
-
--- name: GetPaperCitedBy :many
-SELECT p.* FROM papers p
-JOIN citations c ON p.id = c.citing_paper_id
-WHERE c.cited_paper_id = $1;
 
 -- name: CreateResearchGap :one
 INSERT INTO research_gaps (topic_id, gap_type, title, description, related_paper_ids, evidence, feasibility)
@@ -268,29 +380,6 @@ SELECT * FROM novel_directions WHERE id = $1;
 
 -- name: GetNovelDirectionsByTopic :many
 SELECT * FROM novel_directions WHERE topic_id = $1 ORDER BY feasibility_score DESC NULLS LAST;
-
--- name: CreatePipelineRun :one
-INSERT INTO pipeline_runs (topic_id, stage, status)
-VALUES ($1, $2, $3)
-RETURNING *;
-
--- name: GetPipelineRun :one
-SELECT * FROM pipeline_runs WHERE id = $1;
-
--- name: GetLatestPipelineRun :one
-SELECT * FROM pipeline_runs 
-WHERE topic_id = $1 
-ORDER BY started_at DESC 
-LIMIT 1;
-
--- name: GetPipelineRunsByTopic :many
-SELECT * FROM pipeline_runs WHERE topic_id = $1 ORDER BY started_at;
-
--- name: UpdatePipelineRunStatus :one
-UPDATE pipeline_runs 
-SET status = $2, completed_at = $3, error_message = $4, metrics = $5
-WHERE id = $1
-RETURNING *;
 
 -- name: StartPipelineStage :one
 INSERT INTO pipeline_stage_checkpoints (run_id, topic_id, stage, status, attempt, started_at, completed_at, error_message)

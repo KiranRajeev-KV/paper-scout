@@ -1,3 +1,4 @@
+-- +goose Up
 -- Make author upserts deterministic for source IDs and ID-less arXiv names.
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_semantic_scholar_id
@@ -7,3 +8,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_semantic_scholar_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_fallback_name
     ON authors (lower(btrim(name)))
     WHERE semantic_scholar_id IS NULL;
+
+-- +goose Down
+DROP INDEX IF EXISTS idx_authors_fallback_name;
+DROP INDEX IF EXISTS idx_authors_semantic_scholar_id;

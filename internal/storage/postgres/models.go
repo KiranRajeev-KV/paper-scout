@@ -19,9 +19,36 @@ type Author struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
-type Citation struct {
-	CitingPaperID uuid.UUID `json:"citing_paper_id"`
-	CitedPaperID  uuid.UUID `json:"cited_paper_id"`
+type EmbeddingCleanupTask struct {
+	ID             uuid.UUID          `json:"id"`
+	CollectionName string             `json:"collection_name"`
+	PointID        uuid.UUID          `json:"point_id"`
+	TopicID        uuid.UUID          `json:"topic_id"`
+	PaperID        uuid.UUID          `json:"paper_id"`
+	ChunkID        pgtype.UUID        `json:"chunk_id"`
+	Reason         string             `json:"reason"`
+	Status         string             `json:"status"`
+	Attempts       int32              `json:"attempts"`
+	ErrorMessage   pgtype.Text        `json:"error_message"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+}
+
+type EmbeddingGeneration struct {
+	ID                 uuid.UUID          `json:"id"`
+	Provider           string             `json:"provider"`
+	Model              string             `json:"model"`
+	Dimensions         int32              `json:"dimensions"`
+	InstructionVersion string             `json:"instruction_version"`
+	IndexingVersion    string             `json:"indexing_version"`
+	CollectionName     string             `json:"collection_name"`
+	Status             string             `json:"status"`
+	IndexedChunks      int64              `json:"indexed_chunks"`
+	ErrorMessage       pgtype.Text        `json:"error_message"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	ActivatedAt        pgtype.Timestamptz `json:"activated_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
 }
 
 type NovelDirection struct {
@@ -48,7 +75,6 @@ type Paper struct {
 	Abstract        pgtype.Text        `json:"abstract"`
 	PublicationDate pgtype.Date        `json:"publication_date"`
 	Venue           pgtype.Text        `json:"venue"`
-	EmbeddingStatus pgtype.Text        `json:"embedding_status"`
 	PdfUrl          pgtype.Text        `json:"pdf_url"`
 	PdfDownloaded   pgtype.Bool        `json:"pdf_downloaded"`
 	PdfParsed       pgtype.Bool        `json:"pdf_parsed"`
@@ -63,29 +89,42 @@ type PaperAuthor struct {
 }
 
 type PaperChunk struct {
-	ID              uuid.UUID          `json:"id"`
-	TopicID         uuid.UUID          `json:"topic_id"`
-	PaperID         uuid.UUID          `json:"paper_id"`
-	ChunkType       string             `json:"chunk_type"`
-	ChunkIndex      int32              `json:"chunk_index"`
-	Text            string             `json:"text"`
-	ContentHash     string             `json:"content_hash"`
-	Source          string             `json:"source"`
-	EmbeddingStatus string             `json:"embedding_status"`
-	ErrorMessage    pgtype.Text        `json:"error_message"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                          uuid.UUID          `json:"id"`
+	TopicID                     uuid.UUID          `json:"topic_id"`
+	PaperID                     uuid.UUID          `json:"paper_id"`
+	ChunkType                   string             `json:"chunk_type"`
+	ChunkIndex                  int32              `json:"chunk_index"`
+	Text                        string             `json:"text"`
+	ContentHash                 string             `json:"content_hash"`
+	Source                      string             `json:"source"`
+	EmbeddingStatus             string             `json:"embedding_status"`
+	ErrorMessage                pgtype.Text        `json:"error_message"`
+	CreatedAt                   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                   pgtype.Timestamptz `json:"updated_at"`
+	EmbeddedContentHash         pgtype.Text        `json:"embedded_content_hash"`
+	SectionHeading              pgtype.Text        `json:"section_heading"`
+	EmbeddingProvider           pgtype.Text        `json:"embedding_provider"`
+	EmbeddingModel              pgtype.Text        `json:"embedding_model"`
+	EmbeddingDimensions         pgtype.Int4        `json:"embedding_dimensions"`
+	EmbeddingInstructionVersion pgtype.Text        `json:"embedding_instruction_version"`
+	EmbeddingIndexingVersion    pgtype.Text        `json:"embedding_indexing_version"`
+	QdrantCollection            pgtype.Text        `json:"qdrant_collection"`
+	QdrantPointID               pgtype.UUID        `json:"qdrant_point_id"`
 }
 
-type PipelineRun struct {
-	ID           uuid.UUID          `json:"id"`
-	TopicID      uuid.UUID          `json:"topic_id"`
-	Stage        string             `json:"stage"`
-	Status       string             `json:"status"`
-	StartedAt    pgtype.Timestamptz `json:"started_at"`
-	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
-	ErrorMessage pgtype.Text        `json:"error_message"`
-	Metrics      json.RawMessage    `json:"metrics"`
+type PaperDocument struct {
+	PaperID        uuid.UUID          `json:"paper_id"`
+	PdfHash        string             `json:"pdf_hash"`
+	ParserProvider string             `json:"parser_provider"`
+	ParserVersion  string             `json:"parser_version"`
+	Status         string             `json:"status"`
+	DurationMs     int64              `json:"duration_ms"`
+	Warnings       []byte             `json:"warnings"`
+	ErrorMessage   pgtype.Text        `json:"error_message"`
+	Markdown       pgtype.Text        `json:"markdown"`
+	ParserJson     []byte             `json:"parser_json"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type PipelineStageCheckpoint struct {

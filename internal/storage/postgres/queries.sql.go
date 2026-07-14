@@ -13,20 +13,31 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const addCitation = `-- name: AddCitation :exec
-INSERT INTO citations (citing_paper_id, cited_paper_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING
+const activateEmbeddingGeneration = `-- name: ActivateEmbeddingGeneration :one
+UPDATE embedding_generations
+SET status = 'active', activated_at = COALESCE(activated_at, NOW()), error_message = NULL, updated_at = NOW()
+WHERE id = $1 RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
 `
 
-type AddCitationParams struct {
-	CitingPaperID uuid.UUID `json:"citing_paper_id"`
-	CitedPaperID  uuid.UUID `json:"cited_paper_id"`
-}
-
-func (q *Queries) AddCitation(ctx context.Context, arg AddCitationParams) error {
-	_, err := q.db.Exec(ctx, addCitation, arg.CitingPaperID, arg.CitedPaperID)
-	return err
+func (q *Queries) ActivateEmbeddingGeneration(ctx context.Context, id uuid.UUID) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, activateEmbeddingGeneration, id)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
 }
 
 const addPaperAuthor = `-- name: AddPaperAuthor :exec
@@ -44,6 +55,78 @@ type AddPaperAuthorParams struct {
 func (q *Queries) AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) error {
 	_, err := q.db.Exec(ctx, addPaperAuthor, arg.PaperID, arg.AuthorID, arg.Position)
 	return err
+}
+
+const completeEmbeddingCleanupTask = `-- name: CompleteEmbeddingCleanupTask :one
+UPDATE embedding_cleanup_tasks
+SET status = 'completed', attempts = attempts + 1, error_message = NULL, completed_at = NOW(), updated_at = NOW()
+WHERE id = $1 RETURNING id, collection_name, point_id, topic_id, paper_id, chunk_id, reason, status, attempts, error_message, created_at, updated_at, completed_at
+`
+
+func (q *Queries) CompleteEmbeddingCleanupTask(ctx context.Context, id uuid.UUID) (*EmbeddingCleanupTask, error) {
+	row := q.db.QueryRow(ctx, completeEmbeddingCleanupTask, id)
+	var i EmbeddingCleanupTask
+	err := row.Scan(
+		&i.ID,
+		&i.CollectionName,
+		&i.PointID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkID,
+		&i.Reason,
+		&i.Status,
+		&i.Attempts,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return &i, err
+}
+
+const completePaperChunkEmbedding = `-- name: CompletePaperChunkEmbedding :one
+UPDATE paper_chunks
+SET embedding_status = 'completed',
+    embedded_content_hash = content_hash,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2 AND qdrant_point_id = $3
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
+`
+
+type CompletePaperChunkEmbeddingParams struct {
+	TopicID       uuid.UUID   `json:"topic_id"`
+	ID            uuid.UUID   `json:"id"`
+	QdrantPointID pgtype.UUID `json:"qdrant_point_id"`
+}
+
+func (q *Queries) CompletePaperChunkEmbedding(ctx context.Context, arg CompletePaperChunkEmbeddingParams) (*PaperChunk, error) {
+	row := q.db.QueryRow(ctx, completePaperChunkEmbedding, arg.TopicID, arg.ID, arg.QdrantPointID)
+	var i PaperChunk
+	err := row.Scan(
+		&i.ID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkType,
+		&i.ChunkIndex,
+		&i.Text,
+		&i.ContentHash,
+		&i.Source,
+		&i.EmbeddingStatus,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EmbeddedContentHash,
+		&i.SectionHeading,
+		&i.EmbeddingProvider,
+		&i.EmbeddingModel,
+		&i.EmbeddingDimensions,
+		&i.EmbeddingInstructionVersion,
+		&i.EmbeddingIndexingVersion,
+		&i.QdrantCollection,
+		&i.QdrantPointID,
+	)
+	return &i, err
 }
 
 const completePipelineStage = `-- name: CompletePipelineStage :one
@@ -88,6 +171,103 @@ func (q *Queries) CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (in
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const createEmbeddingCleanupTask = `-- name: CreateEmbeddingCleanupTask :one
+INSERT INTO embedding_cleanup_tasks (collection_name, point_id, topic_id, paper_id, chunk_id, reason)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (collection_name, point_id) DO UPDATE SET
+    status = CASE WHEN embedding_cleanup_tasks.status = 'completed' THEN 'completed' ELSE 'pending' END,
+    reason = EXCLUDED.reason,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING id, collection_name, point_id, topic_id, paper_id, chunk_id, reason, status, attempts, error_message, created_at, updated_at, completed_at
+`
+
+type CreateEmbeddingCleanupTaskParams struct {
+	CollectionName string      `json:"collection_name"`
+	PointID        uuid.UUID   `json:"point_id"`
+	TopicID        uuid.UUID   `json:"topic_id"`
+	PaperID        uuid.UUID   `json:"paper_id"`
+	ChunkID        pgtype.UUID `json:"chunk_id"`
+	Reason         string      `json:"reason"`
+}
+
+func (q *Queries) CreateEmbeddingCleanupTask(ctx context.Context, arg CreateEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error) {
+	row := q.db.QueryRow(ctx, createEmbeddingCleanupTask,
+		arg.CollectionName,
+		arg.PointID,
+		arg.TopicID,
+		arg.PaperID,
+		arg.ChunkID,
+		arg.Reason,
+	)
+	var i EmbeddingCleanupTask
+	err := row.Scan(
+		&i.ID,
+		&i.CollectionName,
+		&i.PointID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkID,
+		&i.Reason,
+		&i.Status,
+		&i.Attempts,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return &i, err
+}
+
+const createEmbeddingGeneration = `-- name: CreateEmbeddingGeneration :one
+INSERT INTO embedding_generations (
+    provider, model, dimensions, instruction_version, indexing_version, collection_name, status
+) VALUES ($1, $2, $3, $4, $5, $6, 'building')
+ON CONFLICT (provider, model, dimensions, instruction_version, indexing_version) DO UPDATE SET
+    collection_name = EXCLUDED.collection_name,
+    status = CASE WHEN embedding_generations.status = 'active' THEN 'active' ELSE 'building' END,
+    error_message = NULL,
+    updated_at = NOW()
+RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
+`
+
+type CreateEmbeddingGenerationParams struct {
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	Dimensions         int32  `json:"dimensions"`
+	InstructionVersion string `json:"instruction_version"`
+	IndexingVersion    string `json:"indexing_version"`
+	CollectionName     string `json:"collection_name"`
+}
+
+func (q *Queries) CreateEmbeddingGeneration(ctx context.Context, arg CreateEmbeddingGenerationParams) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, createEmbeddingGeneration,
+		arg.Provider,
+		arg.Model,
+		arg.Dimensions,
+		arg.InstructionVersion,
+		arg.IndexingVersion,
+		arg.CollectionName,
+	)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
 }
 
 const createNovelDirection = `-- name: CreateNovelDirection :one
@@ -206,34 +386,6 @@ func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) (uuid.
 	var paper_id uuid.UUID
 	err := row.Scan(&paper_id)
 	return paper_id, err
-}
-
-const createPipelineRun = `-- name: CreatePipelineRun :one
-INSERT INTO pipeline_runs (topic_id, stage, status)
-VALUES ($1, $2, $3)
-RETURNING id, topic_id, stage, status, started_at, completed_at, error_message, metrics
-`
-
-type CreatePipelineRunParams struct {
-	TopicID uuid.UUID `json:"topic_id"`
-	Stage   string    `json:"stage"`
-	Status  string    `json:"status"`
-}
-
-func (q *Queries) CreatePipelineRun(ctx context.Context, arg CreatePipelineRunParams) (*PipelineRun, error) {
-	row := q.db.QueryRow(ctx, createPipelineRun, arg.TopicID, arg.Stage, arg.Status)
-	var i PipelineRun
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Stage,
-		&i.Status,
-		&i.StartedAt,
-		&i.CompletedAt,
-		&i.ErrorMessage,
-		&i.Metrics,
-	)
-	return &i, err
 }
 
 const createResearchGap = `-- name: CreateResearchGap :one
@@ -355,7 +507,7 @@ WHERE topic_id = $1
   AND paper_id = $2
   AND chunk_type = $3
   AND chunk_index >= $4
-RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
 `
 
 type DeleteStalePaperChunksParams struct {
@@ -392,6 +544,15 @@ func (q *Queries) DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePap
 			&i.ErrorMessage,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.EmbeddedContentHash,
+			&i.SectionHeading,
+			&i.EmbeddingProvider,
+			&i.EmbeddingModel,
+			&i.EmbeddingDimensions,
+			&i.EmbeddingInstructionVersion,
+			&i.EmbeddingIndexingVersion,
+			&i.QdrantCollection,
+			&i.QdrantPointID,
 		); err != nil {
 			return nil, err
 		}
@@ -401,6 +562,38 @@ func (q *Queries) DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePap
 		return nil, err
 	}
 	return items, nil
+}
+
+const failEmbeddingCleanupTask = `-- name: FailEmbeddingCleanupTask :one
+UPDATE embedding_cleanup_tasks
+SET status = 'failed', attempts = attempts + 1, error_message = $2, updated_at = NOW()
+WHERE id = $1 RETURNING id, collection_name, point_id, topic_id, paper_id, chunk_id, reason, status, attempts, error_message, created_at, updated_at, completed_at
+`
+
+type FailEmbeddingCleanupTaskParams struct {
+	ID           uuid.UUID   `json:"id"`
+	ErrorMessage pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) FailEmbeddingCleanupTask(ctx context.Context, arg FailEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error) {
+	row := q.db.QueryRow(ctx, failEmbeddingCleanupTask, arg.ID, arg.ErrorMessage)
+	var i EmbeddingCleanupTask
+	err := row.Scan(
+		&i.ID,
+		&i.CollectionName,
+		&i.PointID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkID,
+		&i.Reason,
+		&i.Status,
+		&i.Attempts,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return &i, err
 }
 
 const failPipelineStage = `-- name: FailPipelineStage :one
@@ -436,8 +629,33 @@ func (q *Queries) FailPipelineStage(ctx context.Context, arg FailPipelineStagePa
 	return &i, err
 }
 
+const getActiveEmbeddingGeneration = `-- name: GetActiveEmbeddingGeneration :one
+SELECT id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at FROM embedding_generations WHERE status = 'active'
+`
+
+func (q *Queries) GetActiveEmbeddingGeneration(ctx context.Context) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, getActiveEmbeddingGeneration)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const getCompletedPaperChunks = `-- name: GetCompletedPaperChunks :many
-SELECT id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at FROM paper_chunks
+SELECT id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id FROM paper_chunks
 WHERE topic_id = $1
   AND paper_id = $2
   AND embedding_status = 'completed'
@@ -471,6 +689,15 @@ func (q *Queries) GetCompletedPaperChunks(ctx context.Context, arg GetCompletedP
 			&i.ErrorMessage,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.EmbeddedContentHash,
+			&i.SectionHeading,
+			&i.EmbeddingProvider,
+			&i.EmbeddingModel,
+			&i.EmbeddingDimensions,
+			&i.EmbeddingInstructionVersion,
+			&i.EmbeddingIndexingVersion,
+			&i.QdrantCollection,
+			&i.QdrantPointID,
 		); err != nil {
 			return nil, err
 		}
@@ -507,25 +734,43 @@ func (q *Queries) GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.
 	return items, nil
 }
 
-const getLatestPipelineRun = `-- name: GetLatestPipelineRun :one
-SELECT id, topic_id, stage, status, started_at, completed_at, error_message, metrics FROM pipeline_runs 
-WHERE topic_id = $1 
-ORDER BY started_at DESC 
-LIMIT 1
+const getEmbeddingGenerationByIdentity = `-- name: GetEmbeddingGenerationByIdentity :one
+SELECT id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at FROM embedding_generations
+WHERE provider = $1 AND model = $2 AND dimensions = $3
+  AND instruction_version = $4 AND indexing_version = $5
 `
 
-func (q *Queries) GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error) {
-	row := q.db.QueryRow(ctx, getLatestPipelineRun, topicID)
-	var i PipelineRun
+type GetEmbeddingGenerationByIdentityParams struct {
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	Dimensions         int32  `json:"dimensions"`
+	InstructionVersion string `json:"instruction_version"`
+	IndexingVersion    string `json:"indexing_version"`
+}
+
+func (q *Queries) GetEmbeddingGenerationByIdentity(ctx context.Context, arg GetEmbeddingGenerationByIdentityParams) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, getEmbeddingGenerationByIdentity,
+		arg.Provider,
+		arg.Model,
+		arg.Dimensions,
+		arg.InstructionVersion,
+		arg.IndexingVersion,
+	)
+	var i EmbeddingGeneration
 	err := row.Scan(
 		&i.ID,
-		&i.TopicID,
-		&i.Stage,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
 		&i.Status,
-		&i.StartedAt,
-		&i.CompletedAt,
+		&i.IndexedChunks,
 		&i.ErrorMessage,
-		&i.Metrics,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
 	)
 	return &i, err
 }
@@ -605,7 +850,7 @@ func (q *Queries) GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UU
 }
 
 const getPaper = `-- name: GetPaper :one
-SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE id = $1
+SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE id = $1
 `
 
 func (q *Queries) GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error) {
@@ -620,7 +865,6 @@ func (q *Queries) GetPaper(ctx context.Context, id uuid.UUID) (*Paper, error) {
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
 		&i.PdfParsed,
@@ -664,7 +908,7 @@ func (q *Queries) GetPaperAuthors(ctx context.Context, paperID uuid.UUID) ([]*Au
 }
 
 const getPaperByExternalID = `-- name: GetPaperByExternalID :one
-SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE source = $1 AND external_id = $2
+SELECT id, source, external_id, source_url, title, abstract, publication_date, venue, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at FROM papers WHERE source = $1 AND external_id = $2
 `
 
 type GetPaperByExternalIDParams struct {
@@ -684,7 +928,6 @@ func (q *Queries) GetPaperByExternalID(ctx context.Context, arg GetPaperByExtern
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
 		&i.PdfParsed,
@@ -695,7 +938,7 @@ func (q *Queries) GetPaperByExternalID(ctx context.Context, arg GetPaperByExtern
 }
 
 const getPaperChunks = `-- name: GetPaperChunks :many
-SELECT id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at FROM paper_chunks
+SELECT id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id FROM paper_chunks
 WHERE topic_id = $1 AND paper_id = $2
 ORDER BY chunk_type, chunk_index
 `
@@ -727,6 +970,15 @@ func (q *Queries) GetPaperChunks(ctx context.Context, arg GetPaperChunksParams) 
 			&i.ErrorMessage,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.EmbeddedContentHash,
+			&i.SectionHeading,
+			&i.EmbeddingProvider,
+			&i.EmbeddingModel,
+			&i.EmbeddingDimensions,
+			&i.EmbeddingInstructionVersion,
+			&i.EmbeddingIndexingVersion,
+			&i.QdrantCollection,
+			&i.QdrantPointID,
 		); err != nil {
 			return nil, err
 		}
@@ -738,90 +990,32 @@ func (q *Queries) GetPaperChunks(ctx context.Context, arg GetPaperChunksParams) 
 	return items, nil
 }
 
-const getPaperCitations = `-- name: GetPaperCitations :many
-SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
-JOIN citations c ON p.id = c.cited_paper_id
-WHERE c.citing_paper_id = $1
+const getPaperDocument = `-- name: GetPaperDocument :one
+SELECT paper_id, pdf_hash, parser_provider, parser_version, status, duration_ms, warnings, error_message, markdown, parser_json, created_at, updated_at FROM paper_documents WHERE paper_id = $1
 `
 
-func (q *Queries) GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID) ([]*Paper, error) {
-	rows, err := q.db.Query(ctx, getPaperCitations, citingPaperID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []*Paper{}
-	for rows.Next() {
-		var i Paper
-		if err := rows.Scan(
-			&i.ID,
-			&i.Source,
-			&i.ExternalID,
-			&i.SourceUrl,
-			&i.Title,
-			&i.Abstract,
-			&i.PublicationDate,
-			&i.Venue,
-			&i.EmbeddingStatus,
-			&i.PdfUrl,
-			&i.PdfDownloaded,
-			&i.PdfParsed,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, &i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getPaperCitedBy = `-- name: GetPaperCitedBy :many
-SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
-JOIN citations c ON p.id = c.citing_paper_id
-WHERE c.cited_paper_id = $1
-`
-
-func (q *Queries) GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) ([]*Paper, error) {
-	rows, err := q.db.Query(ctx, getPaperCitedBy, citedPaperID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []*Paper{}
-	for rows.Next() {
-		var i Paper
-		if err := rows.Scan(
-			&i.ID,
-			&i.Source,
-			&i.ExternalID,
-			&i.SourceUrl,
-			&i.Title,
-			&i.Abstract,
-			&i.PublicationDate,
-			&i.Venue,
-			&i.EmbeddingStatus,
-			&i.PdfUrl,
-			&i.PdfDownloaded,
-			&i.PdfParsed,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, &i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+func (q *Queries) GetPaperDocument(ctx context.Context, paperID uuid.UUID) (*PaperDocument, error) {
+	row := q.db.QueryRow(ctx, getPaperDocument, paperID)
+	var i PaperDocument
+	err := row.Scan(
+		&i.PaperID,
+		&i.PdfHash,
+		&i.ParserProvider,
+		&i.ParserVersion,
+		&i.Status,
+		&i.DurationMs,
+		&i.Warnings,
+		&i.ErrorMessage,
+		&i.Markdown,
+		&i.ParserJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
 }
 
 const getPapersByTopic = `-- name: GetPapersByTopic :many
-SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at FROM papers p
 JOIN topic_papers tp ON tp.paper_id = p.id
 WHERE tp.topic_id = $1
 ORDER BY tp.relevance_score DESC NULLS LAST
@@ -845,7 +1039,6 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
 			&i.PdfParsed,
@@ -863,7 +1056,7 @@ func (q *Queries) GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*P
 }
 
 const getPapersByTopicForAnalysis = `-- name: GetPapersByTopicForAnalysis :many
-SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.embedding_status, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at,
+SELECT p.id, p.source, p.external_id, p.source_url, p.title, p.abstract, p.publication_date, p.venue, p.pdf_url, p.pdf_downloaded, p.pdf_parsed, p.created_at, p.updated_at,
        tp.analysis AS topic_analysis,
        tp.relevance_score AS topic_relevance_score,
        ARRAY(
@@ -888,7 +1081,6 @@ type GetPapersByTopicForAnalysisRow struct {
 	Abstract            pgtype.Text        `json:"abstract"`
 	PublicationDate     pgtype.Date        `json:"publication_date"`
 	Venue               pgtype.Text        `json:"venue"`
-	EmbeddingStatus     pgtype.Text        `json:"embedding_status"`
 	PdfUrl              pgtype.Text        `json:"pdf_url"`
 	PdfDownloaded       pgtype.Bool        `json:"pdf_downloaded"`
 	PdfParsed           pgtype.Bool        `json:"pdf_parsed"`
@@ -917,7 +1109,6 @@ func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.
 			&i.Abstract,
 			&i.PublicationDate,
 			&i.Venue,
-			&i.EmbeddingStatus,
 			&i.PdfUrl,
 			&i.PdfDownloaded,
 			&i.PdfParsed,
@@ -926,59 +1117,6 @@ func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.
 			&i.TopicAnalysis,
 			&i.TopicRelevanceScore,
 			&i.Authors,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, &i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getPipelineRun = `-- name: GetPipelineRun :one
-SELECT id, topic_id, stage, status, started_at, completed_at, error_message, metrics FROM pipeline_runs WHERE id = $1
-`
-
-func (q *Queries) GetPipelineRun(ctx context.Context, id uuid.UUID) (*PipelineRun, error) {
-	row := q.db.QueryRow(ctx, getPipelineRun, id)
-	var i PipelineRun
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Stage,
-		&i.Status,
-		&i.StartedAt,
-		&i.CompletedAt,
-		&i.ErrorMessage,
-		&i.Metrics,
-	)
-	return &i, err
-}
-
-const getPipelineRunsByTopic = `-- name: GetPipelineRunsByTopic :many
-SELECT id, topic_id, stage, status, started_at, completed_at, error_message, metrics FROM pipeline_runs WHERE topic_id = $1 ORDER BY started_at
-`
-
-func (q *Queries) GetPipelineRunsByTopic(ctx context.Context, topicID uuid.UUID) ([]*PipelineRun, error) {
-	rows, err := q.db.Query(ctx, getPipelineRunsByTopic, topicID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []*PipelineRun{}
-	for rows.Next() {
-		var i PipelineRun
-		if err := rows.Scan(
-			&i.ID,
-			&i.TopicID,
-			&i.Stage,
-			&i.Status,
-			&i.StartedAt,
-			&i.CompletedAt,
-			&i.ErrorMessage,
-			&i.Metrics,
 		); err != nil {
 			return nil, err
 		}
@@ -1174,6 +1312,93 @@ func (q *Queries) GetResearchTopicByStatus(ctx context.Context, status string) (
 	return items, nil
 }
 
+const listPaperChunksForReindex = `-- name: ListPaperChunksForReindex :many
+SELECT id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id FROM paper_chunks
+ORDER BY topic_id, paper_id, chunk_type, chunk_index
+`
+
+func (q *Queries) ListPaperChunksForReindex(ctx context.Context) ([]*PaperChunk, error) {
+	rows, err := q.db.Query(ctx, listPaperChunksForReindex)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*PaperChunk{}
+	for rows.Next() {
+		var i PaperChunk
+		if err := rows.Scan(
+			&i.ID,
+			&i.TopicID,
+			&i.PaperID,
+			&i.ChunkType,
+			&i.ChunkIndex,
+			&i.Text,
+			&i.ContentHash,
+			&i.Source,
+			&i.EmbeddingStatus,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.EmbeddedContentHash,
+			&i.SectionHeading,
+			&i.EmbeddingProvider,
+			&i.EmbeddingModel,
+			&i.EmbeddingDimensions,
+			&i.EmbeddingInstructionVersion,
+			&i.EmbeddingIndexingVersion,
+			&i.QdrantCollection,
+			&i.QdrantPointID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingEmbeddingCleanupTasks = `-- name: ListPendingEmbeddingCleanupTasks :many
+SELECT id, collection_name, point_id, topic_id, paper_id, chunk_id, reason, status, attempts, error_message, created_at, updated_at, completed_at FROM embedding_cleanup_tasks
+WHERE status IN ('pending', 'failed')
+ORDER BY created_at LIMIT $1
+`
+
+func (q *Queries) ListPendingEmbeddingCleanupTasks(ctx context.Context, limit int32) ([]*EmbeddingCleanupTask, error) {
+	rows, err := q.db.Query(ctx, listPendingEmbeddingCleanupTasks, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*EmbeddingCleanupTask{}
+	for rows.Next() {
+		var i EmbeddingCleanupTask
+		if err := rows.Scan(
+			&i.ID,
+			&i.CollectionName,
+			&i.PointID,
+			&i.TopicID,
+			&i.PaperID,
+			&i.ChunkID,
+			&i.Reason,
+			&i.Status,
+			&i.Attempts,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRecoverableResearchTopics = `-- name: ListRecoverableResearchTopics :many
 SELECT id, topic, expanded_queries, status, config, created_at, updated_at, completed_at, run_id, current_stage, progress, error_message FROM research_topics
 WHERE status NOT IN ('completed', 'failed')
@@ -1255,6 +1480,162 @@ func (q *Queries) ListResearchTopics(ctx context.Context, arg ListResearchTopics
 	return items, nil
 }
 
+const lockPaperChunksForEmbeddingActivation = `-- name: LockPaperChunksForEmbeddingActivation :exec
+LOCK TABLE paper_chunks IN SHARE ROW EXCLUSIVE MODE
+`
+
+func (q *Queries) LockPaperChunksForEmbeddingActivation(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockPaperChunksForEmbeddingActivation)
+	return err
+}
+
+const markPaperChunkEmbeddingIndexing = `-- name: MarkPaperChunkEmbeddingIndexing :one
+UPDATE paper_chunks
+SET embedding_status = 'indexing',
+    embedding_provider = $3,
+    embedding_model = $4,
+    embedding_dimensions = $5,
+    embedding_instruction_version = $6,
+    embedding_indexing_version = $7,
+    qdrant_collection = $8,
+    qdrant_point_id = $9,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
+`
+
+type MarkPaperChunkEmbeddingIndexingParams struct {
+	TopicID                     uuid.UUID   `json:"topic_id"`
+	ID                          uuid.UUID   `json:"id"`
+	EmbeddingProvider           pgtype.Text `json:"embedding_provider"`
+	EmbeddingModel              pgtype.Text `json:"embedding_model"`
+	EmbeddingDimensions         pgtype.Int4 `json:"embedding_dimensions"`
+	EmbeddingInstructionVersion pgtype.Text `json:"embedding_instruction_version"`
+	EmbeddingIndexingVersion    pgtype.Text `json:"embedding_indexing_version"`
+	QdrantCollection            pgtype.Text `json:"qdrant_collection"`
+	QdrantPointID               pgtype.UUID `json:"qdrant_point_id"`
+}
+
+func (q *Queries) MarkPaperChunkEmbeddingIndexing(ctx context.Context, arg MarkPaperChunkEmbeddingIndexingParams) (*PaperChunk, error) {
+	row := q.db.QueryRow(ctx, markPaperChunkEmbeddingIndexing,
+		arg.TopicID,
+		arg.ID,
+		arg.EmbeddingProvider,
+		arg.EmbeddingModel,
+		arg.EmbeddingDimensions,
+		arg.EmbeddingInstructionVersion,
+		arg.EmbeddingIndexingVersion,
+		arg.QdrantCollection,
+		arg.QdrantPointID,
+	)
+	var i PaperChunk
+	err := row.Scan(
+		&i.ID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkType,
+		&i.ChunkIndex,
+		&i.Text,
+		&i.ContentHash,
+		&i.Source,
+		&i.EmbeddingStatus,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EmbeddedContentHash,
+		&i.SectionHeading,
+		&i.EmbeddingProvider,
+		&i.EmbeddingModel,
+		&i.EmbeddingDimensions,
+		&i.EmbeddingInstructionVersion,
+		&i.EmbeddingIndexingVersion,
+		&i.QdrantCollection,
+		&i.QdrantPointID,
+	)
+	return &i, err
+}
+
+const markPaperChunkForActiveGeneration = `-- name: MarkPaperChunkForActiveGeneration :one
+UPDATE paper_chunks
+SET embedding_status = 'completed',
+    embedded_content_hash = content_hash,
+    embedding_provider = $4,
+    embedding_model = $5,
+    embedding_dimensions = $6,
+    embedding_instruction_version = $7,
+    embedding_indexing_version = $8,
+    qdrant_collection = $9,
+    qdrant_point_id = $10,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE topic_id = $1 AND id = $2 AND content_hash = $3
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
+`
+
+type MarkPaperChunkForActiveGenerationParams struct {
+	TopicID                     uuid.UUID   `json:"topic_id"`
+	ID                          uuid.UUID   `json:"id"`
+	ContentHash                 string      `json:"content_hash"`
+	EmbeddingProvider           pgtype.Text `json:"embedding_provider"`
+	EmbeddingModel              pgtype.Text `json:"embedding_model"`
+	EmbeddingDimensions         pgtype.Int4 `json:"embedding_dimensions"`
+	EmbeddingInstructionVersion pgtype.Text `json:"embedding_instruction_version"`
+	EmbeddingIndexingVersion    pgtype.Text `json:"embedding_indexing_version"`
+	QdrantCollection            pgtype.Text `json:"qdrant_collection"`
+	QdrantPointID               pgtype.UUID `json:"qdrant_point_id"`
+}
+
+func (q *Queries) MarkPaperChunkForActiveGeneration(ctx context.Context, arg MarkPaperChunkForActiveGenerationParams) (*PaperChunk, error) {
+	row := q.db.QueryRow(ctx, markPaperChunkForActiveGeneration,
+		arg.TopicID,
+		arg.ID,
+		arg.ContentHash,
+		arg.EmbeddingProvider,
+		arg.EmbeddingModel,
+		arg.EmbeddingDimensions,
+		arg.EmbeddingInstructionVersion,
+		arg.EmbeddingIndexingVersion,
+		arg.QdrantCollection,
+		arg.QdrantPointID,
+	)
+	var i PaperChunk
+	err := row.Scan(
+		&i.ID,
+		&i.TopicID,
+		&i.PaperID,
+		&i.ChunkType,
+		&i.ChunkIndex,
+		&i.Text,
+		&i.ContentHash,
+		&i.Source,
+		&i.EmbeddingStatus,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EmbeddedContentHash,
+		&i.SectionHeading,
+		&i.EmbeddingProvider,
+		&i.EmbeddingModel,
+		&i.EmbeddingDimensions,
+		&i.EmbeddingInstructionVersion,
+		&i.EmbeddingIndexingVersion,
+		&i.QdrantCollection,
+		&i.QdrantPointID,
+	)
+	return &i, err
+}
+
+const retireActiveEmbeddingGenerations = `-- name: RetireActiveEmbeddingGenerations :exec
+UPDATE embedding_generations SET status = 'retired', updated_at = NOW()
+WHERE status = 'active' AND id <> $1
+`
+
+func (q *Queries) RetireActiveEmbeddingGenerations(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, retireActiveEmbeddingGenerations, id)
+	return err
+}
+
 const startPipelineStage = `-- name: StartPipelineStage :one
 INSERT INTO pipeline_stage_checkpoints (run_id, topic_id, stage, status, attempt, started_at, completed_at, error_message)
 VALUES ($1, $2, $3, 'running', 1, NOW(), NULL, NULL)
@@ -1294,6 +1675,38 @@ func (q *Queries) StartPipelineStage(ctx context.Context, arg StartPipelineStage
 	return &i, err
 }
 
+const updateEmbeddingGenerationProgress = `-- name: UpdateEmbeddingGenerationProgress :one
+UPDATE embedding_generations SET indexed_chunks = $2, error_message = $3, updated_at = NOW()
+WHERE id = $1 RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
+`
+
+type UpdateEmbeddingGenerationProgressParams struct {
+	ID            uuid.UUID   `json:"id"`
+	IndexedChunks int64       `json:"indexed_chunks"`
+	ErrorMessage  pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) UpdateEmbeddingGenerationProgress(ctx context.Context, arg UpdateEmbeddingGenerationProgressParams) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, updateEmbeddingGenerationProgress, arg.ID, arg.IndexedChunks, arg.ErrorMessage)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const updatePaperAnalysis = `-- name: UpdatePaperAnalysis :exec
 UPDATE topic_papers
 SET analysis = $3, analysis_status = 'completed', updated_at = NOW()
@@ -1317,7 +1730,7 @@ SET embedding_status = $3,
     error_message = $4,
     updated_at = NOW()
 WHERE topic_id = $1 AND id = $2
-RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
 `
 
 type UpdatePaperChunkEmbeddingStatusParams struct {
@@ -1348,40 +1761,15 @@ func (q *Queries) UpdatePaperChunkEmbeddingStatus(ctx context.Context, arg Updat
 		&i.ErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-	)
-	return &i, err
-}
-
-const updatePaperEmbeddingStatus = `-- name: UpdatePaperEmbeddingStatus :one
-UPDATE papers 
-SET embedding_status = $2, updated_at = NOW()
-WHERE id = $1
-RETURNING id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
-`
-
-type UpdatePaperEmbeddingStatusParams struct {
-	ID              uuid.UUID   `json:"id"`
-	EmbeddingStatus pgtype.Text `json:"embedding_status"`
-}
-
-func (q *Queries) UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePaperEmbeddingStatusParams) (*Paper, error) {
-	row := q.db.QueryRow(ctx, updatePaperEmbeddingStatus, arg.ID, arg.EmbeddingStatus)
-	var i Paper
-	err := row.Scan(
-		&i.ID,
-		&i.Source,
-		&i.ExternalID,
-		&i.SourceUrl,
-		&i.Title,
-		&i.Abstract,
-		&i.PublicationDate,
-		&i.Venue,
-		&i.EmbeddingStatus,
-		&i.PdfUrl,
-		&i.PdfDownloaded,
-		&i.PdfParsed,
-		&i.CreatedAt,
-		&i.UpdatedAt,
+		&i.EmbeddedContentHash,
+		&i.SectionHeading,
+		&i.EmbeddingProvider,
+		&i.EmbeddingModel,
+		&i.EmbeddingDimensions,
+		&i.EmbeddingInstructionVersion,
+		&i.EmbeddingIndexingVersion,
+		&i.QdrantCollection,
+		&i.QdrantPointID,
 	)
 	return &i, err
 }
@@ -1390,7 +1778,7 @@ const updatePaperPDFStatus = `-- name: UpdatePaperPDFStatus :one
 UPDATE papers 
 SET pdf_downloaded = $2, pdf_parsed = $3, updated_at = NOW()
 WHERE id = $1
-RETURNING id, source, external_id, source_url, title, abstract, publication_date, venue, embedding_status, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
+RETURNING id, source, external_id, source_url, title, abstract, publication_date, venue, pdf_url, pdf_downloaded, pdf_parsed, created_at, updated_at
 `
 
 type UpdatePaperPDFStatusParams struct {
@@ -1411,7 +1799,6 @@ func (q *Queries) UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFSt
 		&i.Abstract,
 		&i.PublicationDate,
 		&i.Venue,
-		&i.EmbeddingStatus,
 		&i.PdfUrl,
 		&i.PdfDownloaded,
 		&i.PdfParsed,
@@ -1436,43 +1823,6 @@ type UpdatePaperRelevanceScoreParams struct {
 func (q *Queries) UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error {
 	_, err := q.db.Exec(ctx, updatePaperRelevanceScore, arg.TopicID, arg.PaperID, arg.RelevanceScore)
 	return err
-}
-
-const updatePipelineRunStatus = `-- name: UpdatePipelineRunStatus :one
-UPDATE pipeline_runs 
-SET status = $2, completed_at = $3, error_message = $4, metrics = $5
-WHERE id = $1
-RETURNING id, topic_id, stage, status, started_at, completed_at, error_message, metrics
-`
-
-type UpdatePipelineRunStatusParams struct {
-	ID           uuid.UUID          `json:"id"`
-	Status       string             `json:"status"`
-	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
-	ErrorMessage pgtype.Text        `json:"error_message"`
-	Metrics      json.RawMessage    `json:"metrics"`
-}
-
-func (q *Queries) UpdatePipelineRunStatus(ctx context.Context, arg UpdatePipelineRunStatusParams) (*PipelineRun, error) {
-	row := q.db.QueryRow(ctx, updatePipelineRunStatus,
-		arg.ID,
-		arg.Status,
-		arg.CompletedAt,
-		arg.ErrorMessage,
-		arg.Metrics,
-	)
-	var i PipelineRun
-	err := row.Scan(
-		&i.ID,
-		&i.TopicID,
-		&i.Stage,
-		&i.Status,
-		&i.StartedAt,
-		&i.CompletedAt,
-		&i.ErrorMessage,
-		&i.Metrics,
-	)
-	return &i, err
 }
 
 const updateResearchTopicExpandedQueries = `-- name: UpdateResearchTopicExpandedQueries :one
@@ -1639,33 +1989,43 @@ func (q *Queries) UpsertAuthorBySemanticScholarID(ctx context.Context, arg Upser
 const upsertPaperChunk = `-- name: UpsertPaperChunk :one
 INSERT INTO paper_chunks (
     topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source,
-    embedding_status, error_message
+    embedding_status, error_message, section_heading
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL, $8)
 ON CONFLICT (topic_id, paper_id, chunk_type, chunk_index) DO UPDATE SET
     text = EXCLUDED.text,
     content_hash = EXCLUDED.content_hash,
     source = EXCLUDED.source,
+    section_heading = EXCLUDED.section_heading,
     embedding_status = CASE
         WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_status
         ELSE 'pending'
     END,
+	 embedded_content_hash = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedded_content_hash ELSE NULL END,
+	 embedding_provider = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_provider ELSE NULL END,
+	 embedding_model = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_model ELSE NULL END,
+	 embedding_dimensions = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_dimensions ELSE NULL END,
+	 embedding_instruction_version = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_instruction_version ELSE NULL END,
+	 embedding_indexing_version = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.embedding_indexing_version ELSE NULL END,
+	 qdrant_collection = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.qdrant_collection ELSE NULL END,
+	 qdrant_point_id = CASE WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.qdrant_point_id ELSE NULL END,
     error_message = CASE
         WHEN paper_chunks.content_hash = EXCLUDED.content_hash THEN paper_chunks.error_message
         ELSE NULL
     END,
     updated_at = NOW()
-RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at
+RETURNING id, topic_id, paper_id, chunk_type, chunk_index, text, content_hash, source, embedding_status, error_message, created_at, updated_at, embedded_content_hash, section_heading, embedding_provider, embedding_model, embedding_dimensions, embedding_instruction_version, embedding_indexing_version, qdrant_collection, qdrant_point_id
 `
 
 type UpsertPaperChunkParams struct {
-	TopicID     uuid.UUID `json:"topic_id"`
-	PaperID     uuid.UUID `json:"paper_id"`
-	ChunkType   string    `json:"chunk_type"`
-	ChunkIndex  int32     `json:"chunk_index"`
-	Text        string    `json:"text"`
-	ContentHash string    `json:"content_hash"`
-	Source      string    `json:"source"`
+	TopicID        uuid.UUID   `json:"topic_id"`
+	PaperID        uuid.UUID   `json:"paper_id"`
+	ChunkType      string      `json:"chunk_type"`
+	ChunkIndex     int32       `json:"chunk_index"`
+	Text           string      `json:"text"`
+	ContentHash    string      `json:"content_hash"`
+	Source         string      `json:"source"`
+	SectionHeading pgtype.Text `json:"section_heading"`
 }
 
 func (q *Queries) UpsertPaperChunk(ctx context.Context, arg UpsertPaperChunkParams) (*PaperChunk, error) {
@@ -1677,6 +2037,7 @@ func (q *Queries) UpsertPaperChunk(ctx context.Context, arg UpsertPaperChunkPara
 		arg.Text,
 		arg.ContentHash,
 		arg.Source,
+		arg.SectionHeading,
 	)
 	var i PaperChunk
 	err := row.Scan(
@@ -1690,6 +2051,77 @@ func (q *Queries) UpsertPaperChunk(ctx context.Context, arg UpsertPaperChunkPara
 		&i.Source,
 		&i.EmbeddingStatus,
 		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EmbeddedContentHash,
+		&i.SectionHeading,
+		&i.EmbeddingProvider,
+		&i.EmbeddingModel,
+		&i.EmbeddingDimensions,
+		&i.EmbeddingInstructionVersion,
+		&i.EmbeddingIndexingVersion,
+		&i.QdrantCollection,
+		&i.QdrantPointID,
+	)
+	return &i, err
+}
+
+const upsertPaperDocument = `-- name: UpsertPaperDocument :one
+INSERT INTO paper_documents (
+    paper_id, pdf_hash, parser_provider, parser_version, status, duration_ms, warnings, error_message, markdown, parser_json
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (paper_id) DO UPDATE SET
+    pdf_hash = EXCLUDED.pdf_hash,
+    parser_provider = EXCLUDED.parser_provider,
+    parser_version = EXCLUDED.parser_version,
+    status = EXCLUDED.status,
+    duration_ms = EXCLUDED.duration_ms,
+    warnings = EXCLUDED.warnings,
+    error_message = EXCLUDED.error_message,
+    markdown = EXCLUDED.markdown,
+    parser_json = EXCLUDED.parser_json,
+    updated_at = NOW()
+RETURNING paper_id, pdf_hash, parser_provider, parser_version, status, duration_ms, warnings, error_message, markdown, parser_json, created_at, updated_at
+`
+
+type UpsertPaperDocumentParams struct {
+	PaperID        uuid.UUID   `json:"paper_id"`
+	PdfHash        string      `json:"pdf_hash"`
+	ParserProvider string      `json:"parser_provider"`
+	ParserVersion  string      `json:"parser_version"`
+	Status         string      `json:"status"`
+	DurationMs     int64       `json:"duration_ms"`
+	Warnings       []byte      `json:"warnings"`
+	ErrorMessage   pgtype.Text `json:"error_message"`
+	Markdown       pgtype.Text `json:"markdown"`
+	ParserJson     []byte      `json:"parser_json"`
+}
+
+func (q *Queries) UpsertPaperDocument(ctx context.Context, arg UpsertPaperDocumentParams) (*PaperDocument, error) {
+	row := q.db.QueryRow(ctx, upsertPaperDocument,
+		arg.PaperID,
+		arg.PdfHash,
+		arg.ParserProvider,
+		arg.ParserVersion,
+		arg.Status,
+		arg.DurationMs,
+		arg.Warnings,
+		arg.ErrorMessage,
+		arg.Markdown,
+		arg.ParserJson,
+	)
+	var i PaperDocument
+	err := row.Scan(
+		&i.PaperID,
+		&i.PdfHash,
+		&i.ParserProvider,
+		&i.ParserVersion,
+		&i.Status,
+		&i.DurationMs,
+		&i.Warnings,
+		&i.ErrorMessage,
+		&i.Markdown,
+		&i.ParserJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

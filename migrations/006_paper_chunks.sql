@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE paper_chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     topic_id UUID NOT NULL REFERENCES research_topics(id) ON DELETE CASCADE,
@@ -21,3 +22,6 @@ CREATE INDEX idx_paper_chunks_paper_chunk_index ON paper_chunks(paper_id, chunk_
 
 CREATE TRIGGER update_paper_chunks_updated_at BEFORE UPDATE ON paper_chunks
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- +goose Down
+DROP TABLE IF EXISTS paper_chunks;

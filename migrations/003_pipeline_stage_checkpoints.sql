@@ -1,4 +1,5 @@
 -- 003_pipeline_stage_checkpoints.up.sql
+-- +goose Up
 -- Persist workflow identity and stage checkpoints for crash-safe resumption.
 
 ALTER TABLE research_topics
@@ -50,3 +51,13 @@ CREATE UNIQUE INDEX idx_novel_directions_topic_title ON novel_directions(topic_i
 
 CREATE TRIGGER update_pipeline_stage_checkpoints_updated_at BEFORE UPDATE ON pipeline_stage_checkpoints
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- +goose Down
+DROP TRIGGER IF EXISTS update_pipeline_stage_checkpoints_updated_at ON pipeline_stage_checkpoints;
+DROP INDEX IF EXISTS idx_novel_directions_topic_title;
+DROP INDEX IF EXISTS idx_research_gaps_topic_title;
+DROP INDEX IF EXISTS idx_pipeline_stage_checkpoints_topic;
+DROP INDEX IF EXISTS idx_pipeline_stage_checkpoints_run;
+DROP TABLE IF EXISTS pipeline_stage_checkpoints;
+ALTER TABLE research_topics DROP CONSTRAINT IF EXISTS research_topics_run_id_key;
+ALTER TABLE research_topics DROP COLUMN IF EXISTS run_id;
