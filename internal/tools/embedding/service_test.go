@@ -2,6 +2,7 @@ package embedding
 
 import "testing"
 
+// Protects embedding point id is deterministic and topic scoped.
 func TestEmbeddingPointIDIsDeterministicAndTopicScoped(t *testing.T) {
 	base := PaperEmbedding{TopicID: "topic-a", PaperID: "paper-a", ChunkType: "pdf", ChunkIndex: 2}
 	if got, want := EmbeddingPointID(base), EmbeddingPointID(base); got != want {

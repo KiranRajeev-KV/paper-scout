@@ -1,4 +1,4 @@
-# Research AI Agent - Development Commands
+# Paper Scout - Development Commands
 
 # Build/start dependency services
 build:
@@ -18,9 +18,9 @@ clean:
 
 # View dependency logs
 logs:
-    docker compose logs -f postgres redis qdrant grobid
+    docker compose logs -f postgres redis qdrant docling
 
-# Run Goose migrations for databases not initialized by Docker's init schema (requires goose)
+# Run Goose migrations (requires goose)
 migrate:
     goose -dir migrations postgres "host=localhost port=5432 user=research password=research123 dbname=research_agent sslmode=disable" up
 
@@ -54,8 +54,14 @@ lint:
 
 # Check for issues
 check:
+    @test -z "$(gofmt -l .)"
     go vet ./...
+    go test ./...
     go build ./...
+
+# Rebuild the configured embedding generation and atomically activate it.
+reindex:
+    go run ./cmd/reindex
 
 # Install sqlc (if not installed)
 install-sqlc:

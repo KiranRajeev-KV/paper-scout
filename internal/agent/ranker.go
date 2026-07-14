@@ -2,7 +2,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"sort"
@@ -14,37 +14,41 @@ import (
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
 	"github.com/paper-scout/internal/tools/embedding"
+	"github.com/paper-scout/internal/worker"
 )
 
 const (
 	RerankBatchSize          = 10
-	RerankTopK               = 50
 	ChunkTypeAbstract        = "abstract"
 	EmbeddingStatusCompleted = "completed"
-	EmbeddingStatusFailed    = "failed"
 )
 
 type Ranker struct {
 	postgres   *postgres.Client
 	embedder   *embedding.Generator
-	llm        *llm.Client
+	llm        llm.Generator
 	structured *llm.StructuredOutput
+	cleanup    embeddingCleanupReconciler
 
-	generateFn              func(ctx context.Context, text string) ([]float32, error)
-	generateBatchFn         func(ctx context.Context, texts []string) ([][]float32, error)
-	storeEmbeddingFn        func(ctx context.Context, emb embedding.PaperEmbedding) error
-	searchSimilarFn         func(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*embedding.SearchResult, error)
-	getPapersByTopicFn      func(ctx context.Context, topicID string) ([]*postgres.Paper, error)
-	updateRelevanceScoreFn  func(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error
-	updateEmbeddingStatusFn func(ctx context.Context, paperID uuid.UUID, status string) error
+	generateFn             func(ctx context.Context, text string) ([]float32, error)
+	generateBatchFn        func(ctx context.Context, texts []string) ([][]float32, error)
+	storeEmbeddingFn       func(ctx context.Context, emb embedding.PaperEmbedding) error
+	searchSimilarFn        func(ctx context.Context, vector []float32, limit uint64, topicID string) ([]*embedding.SearchResult, error)
+	getPapersByTopicFn     func(ctx context.Context, topicID string) ([]*postgres.Paper, error)
+	updateRelevanceScoreFn func(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error
 }
 
-func NewRanker(pg *postgres.Client, emb *embedding.Generator, llmClient *llm.Client) *Ranker {
+type embeddingCleanupReconciler interface {
+	ReconcileEmbeddingCleanup(context.Context, int32) (worker.CleanupResult, error)
+}
+
+func NewRanker(pg *postgres.Client, emb *embedding.Generator, llmClient llm.Generator, cleanup embeddingCleanupReconciler) *Ranker {
 	ranker := &Ranker{
 		postgres:   pg,
 		embedder:   emb,
 		llm:        llmClient,
 		structured: llm.NewStructuredOutput(llmClient),
+		cleanup:    cleanup,
 	}
 	ranker.generateFn = emb.Generate
 	ranker.generateBatchFn = emb.GenerateBatch
@@ -52,7 +56,6 @@ func NewRanker(pg *postgres.Client, emb *embedding.Generator, llmClient *llm.Cli
 	ranker.searchSimilarFn = emb.SearchSimilar
 	ranker.getPapersByTopicFn = ranker.getPapersByTopic
 	ranker.updateRelevanceScoreFn = ranker.updateRelevanceScore
-	ranker.updateEmbeddingStatusFn = ranker.updateEmbeddingStatus
 	return ranker
 }
 
@@ -70,12 +73,12 @@ type paperWithScore struct {
 }
 
 func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPapers int) ([]RankedPaper, error) {
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
-		Str("topic", topic).
+		Int("topic_chars", len(topic)).
 		Msg("Starting paper ranking")
 
-	logger.Info().Msg("Embedding topic for Qdrant search")
+	logger.From(ctx).Info().Msg("Embedding topic for Qdrant search")
 	topicVector, err := r.generateFn(ctx, topic)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed topic: %w", err)
@@ -86,7 +89,7 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		return nil, fmt.Errorf("failed to get papers: %w", err)
 	}
 
-	logger.Info().Int("papers", len(papers)).Msg("Papers retrieved for ranking")
+	logger.From(ctx).Info().Int("papers", len(papers)).Msg("Papers retrieved for ranking")
 
 	queryablePapers, err := r.ensureEmbeddings(ctx, topicID, papers)
 	if err != nil {
@@ -107,30 +110,26 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		return nil, fmt.Errorf("qdrant returned no ranked papers for topic %s", topicID)
 	}
 
-	topK := RerankTopK
-	if len(scored) < topK {
-		topK = len(scored)
-	}
-	scored = scored[:topK]
+	topK := len(scored)
 
-	logger.Info().Int("papers", topK).Msg("Top papers selected from Qdrant for LLM reranking")
+	logger.From(ctx).Info().Int("papers", topK).Msg("Top papers selected from Qdrant for LLM reranking")
 
 	if r.llm != nil && len(scored) > 0 {
 		reranked, err := r.rerankWithLLM(ctx, topic, scored)
 		if err != nil {
-			logger.Warn().Err(err).Msg("LLM reranking failed, using Qdrant scores")
-		} else {
-			scored = reranked
+			return nil, fmt.Errorf("LLM reranking failed: %w", err)
 		}
+		scored = reranked
 	}
 
 	if maxPapers > 0 && len(scored) > maxPapers {
 		scored = scored[:maxPapers]
 	}
 
-	logger.Info().Int("papers", len(scored)).Msg("Storing relevance scores")
+	logger.From(ctx).Info().Int("papers", len(scored)).Msg("Storing relevance scores")
 
 	ranked := make([]RankedPaper, 0, len(scored))
+	var persistenceFailures []ItemFailure
 	for _, s := range scored {
 		ranked = append(ranked, RankedPaper{
 			ID:             s.paper.ID.String(),
@@ -141,11 +140,15 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 		})
 
 		if err := r.updateRelevanceScoreFn(ctx, topicID, s.paper.ID, s.score); err != nil {
-			logger.Warn().Err(err).Str("paper_id", s.paper.ID.String()).Msg("Failed to update relevance score")
+			logger.From(ctx).Warn().Err(err).Str("paper_id", s.paper.ID.String()).Msg("Failed to update relevance score")
+			persistenceFailures = append(persistenceFailures, ItemFailure{Kind: "paper", Identifier: s.paper.ID.String(), Err: err})
 		}
 	}
+	if err := newBatchError("ranking persistence", len(scored), persistenceFailures); err != nil {
+		return nil, err
+	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Int("ranked_papers", len(ranked)).
 		Msg("Paper ranking complete")
 
@@ -153,6 +156,9 @@ func (r *Ranker) Rank(ctx context.Context, topicID string, topic string, maxPape
 }
 
 func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []*postgres.Paper) (map[string]*postgres.Paper, error) {
+	if r.postgres != nil && r.embedder != nil {
+		return r.ensureDurableAbstractEmbeddings(ctx, topicID, papers)
+	}
 	queryablePapers := make(map[string]*postgres.Paper)
 	texts := make([]string, 0, len(papers))
 	papersToEmbed := make([]*postgres.Paper, 0, len(papers))
@@ -160,7 +166,7 @@ func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []
 	for _, paper := range papers {
 		abstract := pgTextVal(paper.Abstract)
 		if abstract == "" {
-			logger.Debug().Str("paper_id", paper.ID.String()).Msg("Skipping paper with no abstract")
+			logger.From(ctx).Debug().Str("paper_id", paper.ID.String()).Msg("Skipping paper with no abstract")
 			continue
 		}
 
@@ -173,7 +179,7 @@ func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []
 		return queryablePapers, nil
 	}
 
-	logger.Info().Int("papers", len(papersToEmbed)).Msg("Generating abstract embeddings for Qdrant")
+	logger.From(ctx).Info().Int("papers", len(papersToEmbed)).Msg("Generating abstract embeddings for Qdrant")
 	vectors, err := r.generateBatchFn(ctx, texts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate paper embeddings: %w", err)
@@ -192,18 +198,183 @@ func (r *Ranker) ensureEmbeddings(ctx context.Context, topicID string, papers []
 			Vector:     vectors[i],
 		})
 		if err != nil {
-			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to store embedding in Qdrant")
+			logger.From(ctx).Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to store embedding in Qdrant")
 			delete(queryablePapers, paper.ID.String())
-			_ = r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusFailed)
 			continue
-		}
-
-		if err := r.updateEmbeddingStatusFn(ctx, paper.ID, EmbeddingStatusCompleted); err != nil {
-			logger.Warn().Err(err).Str("paper_id", paper.ID.String()).Msg("Failed to update embedding status")
 		}
 	}
 
 	return queryablePapers, nil
+}
+
+func (r *Ranker) ensureDurableAbstractEmbeddings(ctx context.Context, topicID string, papers []*postgres.Paper) (map[string]*postgres.Paper, error) {
+	topicUUID, err := uuid.Parse(topicID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid topic ID: %w", err)
+	}
+	queryable := make(map[string]*postgres.Paper)
+	persisted := make([]*postgres.PaperChunk, 0, len(papers))
+	previous := make(map[uuid.UUID]*postgres.PaperChunk, len(papers))
+	for _, paper := range papers {
+		chunks, err := r.postgres.Queries().GetPaperChunks(ctx, postgres.GetPaperChunksParams{TopicID: topicUUID, PaperID: paper.ID})
+		if err != nil {
+			return nil, fmt.Errorf("load existing abstract chunk for paper %s: %w", paper.ID, err)
+		}
+		for _, chunk := range chunks {
+			if chunk.ChunkType == ChunkTypeAbstract && chunk.ChunkIndex == 0 {
+				previous[paper.ID] = chunk
+				break
+			}
+		}
+	}
+	if err := r.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+		for _, paper := range papers {
+			abstract := pgTextVal(paper.Abstract)
+			if abstract == "" {
+				continue
+			}
+			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(abstract)))
+			if old := previous[paper.ID]; old != nil && old.ContentHash != hash && old.QdrantPointID.Valid && old.QdrantCollection.Valid {
+				if _, err := q.CreateEmbeddingCleanupTask(ctx, postgres.CreateEmbeddingCleanupTaskParams{
+					CollectionName: old.QdrantCollection.String, PointID: uuid.UUID(old.QdrantPointID.Bytes),
+					TopicID: topicUUID, PaperID: paper.ID, ChunkID: pgtype.UUID{Bytes: old.ID, Valid: true},
+					Reason: "abstract content replaced",
+				}); err != nil {
+					return fmt.Errorf("schedule old abstract cleanup for paper %s: %w", paper.ID, err)
+				}
+			}
+			chunk, err := q.UpsertPaperChunk(ctx, postgres.UpsertPaperChunkParams{
+				TopicID: topicUUID, PaperID: paper.ID, ChunkType: ChunkTypeAbstract, ChunkIndex: 0,
+				Text: abstract, ContentHash: hash, Source: "paper_metadata", SectionHeading: pgtype.Text{},
+			})
+			if err != nil {
+				return fmt.Errorf("persist abstract chunk for paper %s: %w", paper.ID, err)
+			}
+			queryable[paper.ID.String()] = paper
+			persisted = append(persisted, chunk)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	identity := r.embedder.Identity()
+	collection := r.embedder.CollectionName()
+	stale := make([]*postgres.PaperChunk, 0, len(persisted))
+	texts := make([]string, 0, len(persisted))
+	candidates := make(map[string]*postgres.PaperChunk, len(persisted))
+	for _, chunk := range persisted {
+		if currentAbstractEmbedding(chunk, identity, collection) {
+			candidates[uuid.UUID(chunk.QdrantPointID.Bytes).String()] = chunk
+			continue
+		}
+		stale = append(stale, chunk)
+		texts = append(texts, chunk.Text)
+	}
+	if len(candidates) > 0 {
+		pointIDs := make([]string, 0, len(candidates))
+		for pointID := range candidates {
+			pointIDs = append(pointIDs, pointID)
+		}
+		existing, err := r.embedder.ExistingPoints(ctx, pointIDs)
+		if err != nil {
+			return nil, fmt.Errorf("verify abstract vectors in Qdrant: %w", err)
+		}
+		for pointID, chunk := range candidates {
+			if _, ok := existing[pointID]; ok {
+				continue
+			}
+			if _, err := r.postgres.Queries().UpdatePaperChunkEmbeddingStatus(ctx, postgres.UpdatePaperChunkEmbeddingStatusParams{
+				TopicID: chunk.TopicID, ID: chunk.ID, EmbeddingStatus: "pending",
+				ErrorMessage: pgtype.Text{String: "Qdrant point missing; reindex scheduled", Valid: true},
+			}); err != nil {
+				return nil, fmt.Errorf("reset missing abstract vector %s: %w", pointID, err)
+			}
+			stale = append(stale, chunk)
+			texts = append(texts, chunk.Text)
+		}
+	}
+	if len(stale) == 0 {
+		r.reconcileEmbeddingCleanup(ctx)
+		return queryable, nil
+	}
+	vectors, err := r.embedder.GenerateBatch(ctx, texts)
+	if err != nil {
+		return nil, fmt.Errorf("generate abstract embeddings: %w", err)
+	}
+	embeddings := make([]embedding.PaperEmbedding, len(stale))
+	for index, chunk := range stale {
+		embeddings[index] = embedding.PaperEmbedding{
+			ChunkID: chunk.ID.String(), PaperID: chunk.PaperID.String(), TopicID: chunk.TopicID.String(),
+			ChunkType: chunk.ChunkType, ChunkIndex: int(chunk.ChunkIndex), Text: chunk.Text,
+			ContentHash: chunk.ContentHash, SectionHeading: chunk.SectionHeading.String, Identity: identity, Vector: vectors[index],
+		}
+	}
+	if err := r.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+		for index, chunk := range stale {
+			pointID, parseErr := uuid.Parse(embedding.EmbeddingPointID(embeddings[index]))
+			if parseErr != nil {
+				return parseErr
+			}
+			if _, err := q.MarkPaperChunkEmbeddingIndexing(ctx, postgres.MarkPaperChunkEmbeddingIndexingParams{
+				TopicID: chunk.TopicID, ID: chunk.ID,
+				EmbeddingProvider: pgText(identity.Provider), EmbeddingModel: pgText(identity.Model),
+				EmbeddingDimensions:         pgtype.Int4{Int32: int32(identity.Dimensions), Valid: true},
+				EmbeddingInstructionVersion: pgText(identity.InstructionVersion), EmbeddingIndexingVersion: pgText(identity.IndexingVersion),
+				QdrantCollection: pgText(collection), QdrantPointID: pgtype.UUID{Bytes: pointID, Valid: true},
+			}); err != nil {
+				return fmt.Errorf("mark abstract chunk %s indexing: %w", chunk.ID, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := r.embedder.StoreEmbeddings(ctx, embeddings); err != nil {
+		return nil, fmt.Errorf("store abstract embeddings: %w", err)
+	}
+	if err := r.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+		for index, chunk := range stale {
+			pointID, parseErr := uuid.Parse(embedding.EmbeddingPointID(embeddings[index]))
+			if parseErr != nil {
+				return fmt.Errorf("parse deterministic point ID: %w", parseErr)
+			}
+			if _, err := q.CompletePaperChunkEmbedding(ctx, postgres.CompletePaperChunkEmbeddingParams{
+				TopicID: chunk.TopicID, ID: chunk.ID, QdrantPointID: pgtype.UUID{Bytes: pointID, Valid: true},
+			}); err != nil {
+				return fmt.Errorf("complete abstract embedding %s: %w", chunk.ID, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	r.reconcileEmbeddingCleanup(ctx)
+	return queryable, nil
+}
+
+func (r *Ranker) reconcileEmbeddingCleanup(ctx context.Context) {
+	if r.cleanup == nil {
+		return
+	}
+	result, err := r.cleanup.ReconcileEmbeddingCleanup(ctx, 100)
+	if err != nil {
+		logger.From(ctx).Warn().Err(err).Int("pending", result.Pending).Msg("Embedding cleanup remains retryable after abstract indexing")
+		return
+	}
+	if result.Completed > 0 || result.Pending > 0 {
+		logger.From(ctx).Info().Int("completed", result.Completed).Int("pending", result.Pending).Msg("Reconciled embedding cleanup after abstract indexing")
+	}
+}
+
+func currentAbstractEmbedding(chunk *postgres.PaperChunk, identity embedding.Identity, collection string) bool {
+	return chunk.EmbeddingStatus == EmbeddingStatusCompleted && chunk.EmbeddedContentHash.Valid && chunk.EmbeddedContentHash.String == chunk.ContentHash &&
+		chunk.EmbeddingProvider.Valid && chunk.EmbeddingProvider.String == identity.Provider &&
+		chunk.EmbeddingModel.Valid && chunk.EmbeddingModel.String == identity.Model &&
+		chunk.EmbeddingDimensions.Valid && int(chunk.EmbeddingDimensions.Int32) == identity.Dimensions &&
+		chunk.EmbeddingInstructionVersion.Valid && chunk.EmbeddingInstructionVersion.String == identity.InstructionVersion &&
+		chunk.EmbeddingIndexingVersion.Valid && chunk.EmbeddingIndexingVersion.String == identity.IndexingVersion &&
+		chunk.QdrantCollection.Valid && chunk.QdrantCollection.String == collection && chunk.QdrantPointID.Valid
 }
 
 func rankSearchResults(results []*embedding.SearchResult, papersByID map[string]*postgres.Paper) []paperWithScore {
@@ -238,12 +409,9 @@ func rankSearchResults(results []*embedding.SearchResult, papersByID map[string]
 }
 
 func rankQueryLimit(totalPapers, maxPapers int) int {
-	limit := RerankTopK
-	if maxPapers > limit {
+	limit := totalPapers
+	if maxPapers > 0 && maxPapers < limit {
 		limit = maxPapers
-	}
-	if totalPapers < limit {
-		limit = totalPapers
 	}
 	if limit < 1 {
 		return 1
@@ -252,7 +420,7 @@ func rankQueryLimit(totalPapers, maxPapers int) int {
 }
 
 func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paperWithScore) ([]paperWithScore, error) {
-	logger.Info().Int("papers", len(papers)).Msg("Starting LLM reranking")
+	logger.From(ctx).Info().Int("papers", len(papers)).Msg("Starting LLM reranking")
 
 	allScored := make([]paperWithScore, 0, len(papers))
 	totalBatches := (len(papers) + RerankBatchSize - 1) / RerankBatchSize
@@ -265,7 +433,7 @@ func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paper
 		batch := papers[i:end]
 		batchNum := (i / RerankBatchSize) + 1
 
-		logger.Info().
+		logger.From(ctx).Info().
 			Int("batch", batchNum).
 			Int("total_batches", totalBatches).
 			Int("papers_in_batch", len(batch)).
@@ -273,20 +441,20 @@ func (r *Ranker) rerankWithLLM(ctx context.Context, topic string, papers []paper
 
 		batchScored, err := r.rerankBatch(ctx, topic, batch)
 		if err != nil {
-			logger.Warn().Err(err).Int("batch_start", i).Msg("Failed to rerank batch")
+			logger.From(ctx).Warn().Err(err).Int("batch_start", i).Msg("Failed to rerank batch")
 			allScored = append(allScored, batch...)
 			continue
 		}
 
 		allScored = append(allScored, batchScored...)
-		logger.Info().Int("batch", batchNum).Msg("Batch reranked successfully")
+		logger.From(ctx).Info().Int("batch", batchNum).Msg("Batch reranked successfully")
 	}
 
 	sort.Slice(allScored, func(i, j int) bool {
 		return allScored[i].score > allScored[j].score
 	})
 
-	logger.Info().Int("papers", len(allScored)).Msg("LLM reranking complete")
+	logger.From(ctx).Info().Int("papers", len(allScored)).Msg("LLM reranking complete")
 	return allScored, nil
 }
 
@@ -348,25 +516,22 @@ Respond with JSON only:`, topic, paperList.String())
 }
 
 func (r *Ranker) getPapersByTopic(ctx context.Context, topicID string) ([]*postgres.Paper, error) {
-	return r.postgres.Queries().GetPapersByTopic(ctx, pgUUID(topicID))
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return nil, err
+	}
+	return r.postgres.Queries().GetPapersByTopic(ctx, id)
 }
 
 func (r *Ranker) updateRelevanceScore(ctx context.Context, topicID string, paperID uuid.UUID, score float64) error {
-	err := r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
-		TopicID:        pgUUID(topicID),
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return err
+	}
+	err = r.postgres.Queries().UpdatePaperRelevanceScore(ctx, postgres.UpdatePaperRelevanceScoreParams{
+		TopicID:        id,
 		PaperID:        paperID,
 		RelevanceScore: pgFloat64(score),
-	})
-	return err
-}
-
-func (r *Ranker) updateEmbeddingStatus(ctx context.Context, paperID uuid.UUID, status string) error {
-	_, err := r.postgres.Queries().UpdatePaperEmbeddingStatus(ctx, postgres.UpdatePaperEmbeddingStatusParams{
-		ID: paperID,
-		EmbeddingStatus: pgtype.Text{
-			String: status,
-			Valid:  status != "",
-		},
 	})
 	return err
 }
@@ -379,26 +544,6 @@ type scoreEntry struct {
 
 type rerankResponse struct {
 	Scores []scoreEntry `json:"scores"`
-}
-
-func parseRerankResponse(result string) ([]scoreEntry, error) {
-	cleaned := strings.TrimSpace(result)
-	cleaned = strings.TrimPrefix(cleaned, "```json")
-	cleaned = strings.TrimPrefix(cleaned, "```")
-	cleaned = strings.TrimSuffix(cleaned, "```")
-	cleaned = strings.TrimSpace(cleaned)
-
-	var response rerankResponse
-
-	if err := json.Unmarshal([]byte(cleaned), &response); err != nil {
-		return nil, fmt.Errorf("failed to parse: %w", err)
-	}
-
-	if err := validateRerankScores(response.Scores, 0); err != nil {
-		return nil, err
-	}
-
-	return response.Scores, nil
 }
 
 func validateRerankScores(scores []scoreEntry, paperCount int) error {
