@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// Protects chunk by paragraphs with overlap preserves paragraphs.
 func TestChunkByParagraphsWithOverlapPreservesParagraphs(t *testing.T) {
 	chunks := ChunkByParagraphsWithOverlap("one two\n\nthree four\n\nfive six", 4, 1)
 	if len(chunks) != 2 {
@@ -23,6 +24,7 @@ func TestChunkByParagraphsWithOverlapPreservesParagraphs(t *testing.T) {
 	}
 }
 
+// Protects chunk by paragraphs with overlap splits oversized paragraph.
 func TestChunkByParagraphsWithOverlapSplitsOversizedParagraph(t *testing.T) {
 	text := strings.Repeat("word ", 10)
 	chunks := ChunkByParagraphsWithOverlap(text, 4, 1)
@@ -37,8 +39,20 @@ func TestChunkByParagraphsWithOverlapSplitsOversizedParagraph(t *testing.T) {
 	}
 }
 
+// Protects chunk by paragraphs with overlap rejects invalid limit.
 func TestChunkByParagraphsWithOverlapRejectsInvalidLimit(t *testing.T) {
 	if chunks := ChunkByParagraphsWithOverlap("text", 0, 0); chunks != nil {
 		t.Fatalf("chunks = %#v, want nil", chunks)
+	}
+}
+
+// Protects Docling section headings as provenance on generated chunks.
+func TestChunkMarkdownPreservesSectionHeadings(t *testing.T) {
+	chunks := ChunkMarkdown("# Introduction\nalpha beta\n\n## Methods\ngamma delta", 10, 0)
+	if len(chunks) != 2 {
+		t.Fatalf("chunk count = %d, want 2", len(chunks))
+	}
+	if chunks[0].Heading != "Introduction" || chunks[1].Heading != "Methods" {
+		t.Fatalf("headings = (%q, %q)", chunks[0].Heading, chunks[1].Heading)
 	}
 }

@@ -12,14 +12,16 @@ import (
 )
 
 type Client struct {
-	client         *genai.Client
-	config         config.LLMConfig
-	retry          *RetryPolicy
-	model          string
-	embModel       string
-	circuitBreaker *circuitbreaker.CircuitBreaker
-	rateLimiter    *LLMRateLimiter
+	client          *genai.Client
+	config          config.LLMConfig
+	retry           *RetryPolicy
+	model           string
+	circuitBreaker  *circuitbreaker.CircuitBreaker
+	rateLimiter     quotaWaiter
+	generateContent func(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error)
 }
+
+type quotaWaiter interface{ Wait(context.Context) error }
 
 func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
@@ -56,19 +58,19 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 
 	logger.Info().
 		Str("model", cfg.Model).
-		Str("embedding_model", cfg.EmbeddingModel).
 		Int("max_output_tokens", cfg.MaxOutputTokens).
 		Msg("Connected to Gemini LLM")
 
-	return &Client{
+	result := &Client{
 		client:         client,
 		config:         cfg,
 		retry:          retry,
 		model:          cfg.Model,
-		embModel:       cfg.EmbeddingModel,
 		circuitBreaker: cb,
 		rateLimiter:    rateLimiter,
-	}, nil
+	}
+	result.generateContent = client.Models.GenerateContent
+	return result, nil
 }
 
 func (c *Client) Close() error {
@@ -79,18 +81,50 @@ func (c *Client) Config() config.LLMConfig {
 	return c.config
 }
 
+func (c *Client) Provider() string { return "gemini" }
+
+func (c *Client) Model() string { return c.model }
+
+func (c *Client) Health(ctx context.Context) error {
+	if c.client == nil || c.model == "" {
+		return fmt.Errorf("gemini generator is not configured")
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+	defer cancel()
+	model, err := c.client.Models.Get(checkCtx, c.model, nil)
+	if err != nil {
+		return fmt.Errorf("get Gemini model %q: %w", c.model, err)
+	}
+	if model == nil || model.Name == "" {
+		return fmt.Errorf("Gemini model %q returned an empty resource", c.model)
+	}
+	return nil
+}
+
+func (c *Client) GenerateStructured(ctx context.Context, prompt string, schema any) (string, error) {
+	responseSchema, err := inferSchema(schema)
+	if err != nil {
+		return "", fmt.Errorf("build Gemini response schema: %w", err)
+	}
+	return c.GenerateWithConfig(ctx, prompt, &genai.GenerateContentConfig{
+		ResponseMIMEType: "application/json",
+		ResponseSchema:   responseSchema,
+	})
+}
+
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	var result string
 	var usage *TokenUsage
 
 	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
-		if c.rateLimiter != nil {
-			if err := c.rateLimiter.Wait(ctx); err != nil {
-				return err
+		return c.retry.Execute(ctx, func(attempt int) error {
+			if c.rateLimiter != nil {
+				if err := c.rateLimiter.Wait(ctx); err != nil {
+					return err
+				}
 			}
-		}
-
-		return c.retry.Execute(ctx, func() error {
+			attemptCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+			defer cancel()
 			parts := []*genai.Part{{Text: prompt}}
 			contents := []*genai.Content{{Parts: parts}}
 
@@ -101,7 +135,8 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 				}
 			}
 
-			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, genConfig)
+			logger.Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling generation provider")
+			resp, err := c.generateContent(attemptCtx, c.model, contents, genConfig)
 			if err != nil {
 				return err
 			}
@@ -137,21 +172,24 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 	var usage *TokenUsage
 
 	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
-		if c.rateLimiter != nil {
-			if err := c.rateLimiter.Wait(ctx); err != nil {
-				return err
+		return c.retry.Execute(ctx, func(attempt int) error {
+			if c.rateLimiter != nil {
+				if err := c.rateLimiter.Wait(ctx); err != nil {
+					return err
+				}
 			}
-		}
-
-		return c.retry.Execute(ctx, func() error {
+			attemptCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+			defer cancel()
 			parts := []*genai.Part{{Text: prompt}}
 			contents := []*genai.Content{{Parts: parts}}
 
-			if c.config.MaxOutputTokens > 0 && cfg.MaxOutputTokens == 0 {
-				cfg.MaxOutputTokens = int32(c.config.MaxOutputTokens)
+			requestConfig := *cfg
+			if c.config.MaxOutputTokens > 0 && requestConfig.MaxOutputTokens == 0 {
+				requestConfig.MaxOutputTokens = int32(c.config.MaxOutputTokens)
 			}
 
-			resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, cfg)
+			logger.Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling structured generation provider")
+			resp, err := c.generateContent(attemptCtx, c.model, contents, &requestConfig)
 			if err != nil {
 				return err
 			}
@@ -180,59 +218,6 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 	}
 
 	return result, nil
-}
-
-func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	var embeddings [][]float32
-
-	err := c.circuitBreaker.Execute(ctx, func(ctx context.Context) error {
-		if c.rateLimiter != nil {
-			if err := c.rateLimiter.Wait(ctx); err != nil {
-				return err
-			}
-		}
-
-		return c.retry.Execute(ctx, func() error {
-			contents := make([]*genai.Content, len(texts))
-			for i, text := range texts {
-				contents[i] = &genai.Content{
-					Parts: []*genai.Part{{Text: text}},
-				}
-			}
-
-			result, err := c.client.Models.EmbedContent(ctx, c.embModel, contents, nil)
-			if err != nil {
-				return err
-			}
-
-			embeddings = make([][]float32, len(result.Embeddings))
-			for i, emb := range result.Embeddings {
-				embeddings[i] = emb.Values
-			}
-			return nil
-		})
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	logger.Debug().
-		Int("count", len(embeddings)).
-		Msg("Embeddings generated")
-
-	return embeddings, nil
-}
-
-func (c *Client) EmbedSingle(ctx context.Context, text string) ([]float32, error) {
-	embeddings, err := c.Embed(ctx, []string{text})
-	if err != nil {
-		return nil, err
-	}
-	if len(embeddings) == 0 {
-		return nil, fmt.Errorf("no embedding returned")
-	}
-	return embeddings[0], nil
 }
 
 type TokenUsage struct {

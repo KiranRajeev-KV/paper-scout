@@ -3,6 +3,7 @@ package pdf
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -41,34 +42,10 @@ func testHTTPPolicy() *httpresilience.Policy {
 	}, 0, 0, nil)
 }
 
-func TestGrobidRetriesWithReplayableMultipartBody(t *testing.T) {
-	calls := 0
-	bodySizes := make([]int64, 0, 2)
-	grobid := NewGrobidClientWithPolicy("http://grobid.test", time.Second, testHTTPPolicy())
-	grobid.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		bodySizes = append(bodySizes, int64(len(body)))
-		if calls == 1 {
-			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("busy")), Header: make(http.Header)}, nil
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("<TEI><text><body/></text></TEI>")), Header: make(http.Header)}, nil
-	})})
-
-	if _, err := grobid.Parse(t.Context(), "paper.pdf", []byte("pdf-data")); err != nil {
-		t.Fatalf("Grobid.Parse returned error: %v", err)
-	}
-	if calls != 2 || len(bodySizes) != 2 || bodySizes[0] == 0 || bodySizes[0] != bodySizes[1] {
-		t.Fatalf("calls = %d, body sizes = %v; want two equivalent multipart attempts", calls, bodySizes)
-	}
-}
-
+// Protects downloader retries transient response.
 func TestDownloaderRetriesTransientResponse(t *testing.T) {
 	calls := 0
-	downloader := NewDownloaderWithPolicy(time.Second, testHTTPPolicy())
+	downloader := NewDownloaderWithPolicyAndMaxBytes(time.Second, testHTTPPolicy(), defaultMaxPDFBytes)
 	downloader.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
@@ -86,6 +63,7 @@ func TestDownloaderRetriesTransientResponse(t *testing.T) {
 	}
 }
 
+// Protects downloader rejects oversized body.
 func TestDownloaderRejectsOversizedBody(t *testing.T) {
 	const maxBytes = int64(8)
 	body := &trackingReader{data: []byte("1234567890")}
@@ -108,6 +86,7 @@ func TestDownloaderRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// Protects downloader rejects declared oversized body without reading.
 func TestDownloaderRejectsDeclaredOversizedBodyWithoutReading(t *testing.T) {
 	const maxBytes = int64(8)
 	body := &trackingReader{data: []byte("1234567890")}
@@ -130,6 +109,7 @@ func TestDownloaderRejectsDeclaredOversizedBodyWithoutReading(t *testing.T) {
 	}
 }
 
+// Protects downloader rejects invalid content type without reading.
 func TestDownloaderRejectsInvalidContentTypeWithoutReading(t *testing.T) {
 	body := &trackingReader{data: []byte("not a PDF")}
 	downloader := NewDownloaderWithMaxBytes(time.Second, 1024)
@@ -150,33 +130,15 @@ func TestDownloaderRejectsInvalidContentTypeWithoutReading(t *testing.T) {
 	}
 }
 
-func TestGrobidRejectsOversizedResponse(t *testing.T) {
-	const maxBytes = int64(32)
-	grobid := NewGrobidClientWithMaxBytes("http://grobid.test", time.Second, maxBytes)
-	grobid.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("<TEI><text><body><div><p>" + strings.Repeat("x", 64) + "</p></div></body></text></TEI>")),
-			Header:     make(http.Header),
-		}, nil
-	})})
-
-	_, err := grobid.Parse(t.Context(), "paper.pdf", []byte("pdf-data"))
-	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
-		t.Fatalf("Parse error = %v; want size-limit error", err)
-	}
-}
-
-func TestGrobidRequestDoesNotRetainMultipartBuffer(t *testing.T) {
-	grobid := NewGrobidClientWithMaxBytes("http://grobid.test", time.Second, 1024)
-	grobid.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if _, err := io.Copy(io.Discard, req.Body); err != nil {
-			return nil, err
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("<TEI><text><body/></text></TEI>")), Header: make(http.Header)}, nil
-	})})
-
-	if _, err := grobid.Parse(t.Context(), "paper.pdf", []byte("pdf-data")); err != nil {
-		t.Fatalf("Parse returned error: %v", err)
+// Protects PDF ingestion from accepting non-PDF bytes with an allowed media type.
+func TestDownloaderRejectsMissingPDFSignature(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write([]byte("not actually a PDF"))
+	}))
+	defer server.Close()
+	downloader := NewDownloaderWithPolicyAndMaxBytes(time.Second, nil, 1024)
+	if _, _, err := downloader.Download(t.Context(), server.URL); err == nil {
+		t.Fatal("Download accepted bytes without a PDF signature")
 	}
 }

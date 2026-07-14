@@ -6,6 +6,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// Protects infer schema preserves field name for option only json tag.
 func TestInferSchemaPreservesFieldNameForOptionOnlyJSONTag(t *testing.T) {
 	type response struct {
 		Result string `json:",omitempty"`
@@ -23,6 +24,7 @@ func TestInferSchemaPreservesFieldNameForOptionOnlyJSONTag(t *testing.T) {
 	}
 }
 
+// Protects infer schema rerank scores.
 func TestInferSchemaRerankScores(t *testing.T) {
 	schema, err := inferSchema(map[string]interface{}{
 		"scores": []map[string]interface{}{
