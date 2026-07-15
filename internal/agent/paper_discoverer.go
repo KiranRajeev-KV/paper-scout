@@ -67,7 +67,7 @@ type discoverySearchResult struct {
 }
 
 func (d *PaperDiscoverer) Discover(ctx context.Context, topicID string, queries []string, keywords []string) ([]DiscoveredPaper, error) {
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
 		Int("queries", len(queries)).
 		Msg("Starting paper discovery")
@@ -131,7 +131,7 @@ func (d *PaperDiscoverer) Discover(ctx context.Context, topicID string, queries 
 	for _, result := range results {
 		if result.err != nil {
 			searchErrors = append(searchErrors, result.err)
-			logger.Warn().Err(result.err).Str("source", result.source).Str("query", result.query).Msg("Paper search failed")
+			logger.From(ctx).Warn().Err(result.err).Str("source", result.source).Int("query_chars", len(result.query)).Msg("Paper search failed")
 			continue
 		}
 		hadSuccess = true
@@ -149,18 +149,23 @@ func (d *PaperDiscoverer) Discover(ctx context.Context, topicID string, queries 
 	if storePaper == nil {
 		storePaper = d.storePaper
 	}
+	persisted := make([]DiscoveredPaper, 0, len(papers))
+	failures := make([]ItemFailure, 0)
 	for i := range papers {
 		if err := storePaper(ctx, topicID, papers[i]); err != nil {
-			logger.Warn().Err(err).Str("external_id", papers[i].ExternalID).Msg("Failed to store paper")
+			logger.From(ctx).Warn().Err(err).Str("external_id", papers[i].ExternalID).Msg("Failed to store paper")
+			failures = append(failures, ItemFailure{Kind: "paper", Identifier: papers[i].ExternalID, Err: err})
+			continue
 		}
+		persisted = append(persisted, papers[i])
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
-		Int("papers_found", len(papers)).
+		Int("papers_found", len(persisted)).
 		Msg("Paper discovery complete")
 
-	return papers, nil
+	return persisted, newBatchError("paper persistence", len(papers), failures)
 }
 
 func (d *PaperDiscoverer) searchSemanticScholar(ctx context.Context, query string, limit int) ([]DiscoveredPaper, error) {
@@ -432,9 +437,13 @@ func formatYear(year int) string {
 }
 
 func (d *PaperDiscoverer) storePaper(ctx context.Context, topicID string, paper DiscoveredPaper) error {
+	topicUUID, err := parseID("topic ID", topicID)
+	if err != nil {
+		return err
+	}
 	return d.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		paperID, err := q.CreatePaper(ctx, postgres.CreatePaperParams{
-			TopicID:         pgUUID(topicID),
+			TopicID:         topicUUID,
 			DiscoverySource: paper.Source,
 			ExternalID:      paper.ExternalID,
 			SourceUrl:       pgText(paper.URL),
@@ -490,9 +499,17 @@ func (d *PaperDiscoverer) storePaper(ctx context.Context, topicID string, paper 
 }
 
 func (d *PaperDiscoverer) ClearPapers(ctx context.Context, topicID string) error {
-	return d.postgres.Queries().DeletePapersByTopic(ctx, pgUUID(topicID))
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return err
+	}
+	return d.postgres.Queries().DeletePapersByTopic(ctx, id)
 }
 
 func (d *PaperDiscoverer) CountPapers(ctx context.Context, topicID string) (int64, error) {
-	return d.postgres.Queries().CountPapersByTopic(ctx, pgUUID(topicID))
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return 0, err
+	}
+	return d.postgres.Queries().CountPapersByTopic(ctx, id)
 }

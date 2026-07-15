@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// Protects discover searches sources concurrently.
 func TestDiscoverSearchesSourcesConcurrently(t *testing.T) {
 	discoverer := &PaperDiscoverer{maxPapers: 10}
 	started := make(chan struct{}, 2)
@@ -62,6 +63,7 @@ func TestDiscoverSearchesSourcesConcurrently(t *testing.T) {
 	}
 }
 
+// Protects discover bounds per query search limit.
 func TestDiscoverBoundsPerQuerySearchLimit(t *testing.T) {
 	discoverer := &PaperDiscoverer{maxPapers: 10}
 	var mu sync.Mutex
@@ -95,6 +97,7 @@ func TestDiscoverBoundsPerQuerySearchLimit(t *testing.T) {
 	}
 }
 
+// Protects discover deduplicates cross source paper.
 func TestDiscoverDeduplicatesCrossSourcePaper(t *testing.T) {
 	discoverer := &PaperDiscoverer{maxPapers: 10}
 	discoverer.searchSemanticScholarFn = func(context.Context, string, int) ([]DiscoveredPaper, error) {
@@ -136,6 +139,7 @@ func TestDiscoverDeduplicatesCrossSourcePaper(t *testing.T) {
 	}
 }
 
+// Protects discover deduplicates by normalized title and year.
 func TestDiscoverDeduplicatesByNormalizedTitleAndYear(t *testing.T) {
 	results := []discoverySearchResult{
 		{
@@ -153,6 +157,7 @@ func TestDiscoverDeduplicatesByNormalizedTitleAndYear(t *testing.T) {
 	}
 }
 
+// Protects discover preserves same title and year without corroboration.
 func TestDiscoverPreservesSameTitleAndYearWithoutCorroboration(t *testing.T) {
 	results := []discoverySearchResult{
 		{source: "semantic_scholar", papers: []DiscoveredPaper{{Source: "semantic_scholar", ExternalID: "ss-1", Title: "Common Title", Year: 2023}}},
@@ -164,6 +169,7 @@ func TestDiscoverPreservesSameTitleAndYearWithoutCorroboration(t *testing.T) {
 	}
 }
 
+// Protects discover returns partial results and fails when all searches fail.
 func TestDiscoverReturnsPartialResultsAndFailsWhenAllSearchesFail(t *testing.T) {
 	discoverer := &PaperDiscoverer{maxPapers: 10}
 	discoverer.searchSemanticScholarFn = func(context.Context, string, int) ([]DiscoveredPaper, error) {
@@ -184,5 +190,23 @@ func TestDiscoverReturnsPartialResultsAndFailsWhenAllSearchesFail(t *testing.T) 
 	}
 	if _, err := discoverer.Discover(context.Background(), "topic-1", []string{"query"}, nil); err == nil {
 		t.Fatal("all-failed discovery returned nil error")
+	}
+}
+
+// Protects discovery from returning unpersisted papers as successful output.
+func TestDiscoveryPersistenceFailureIsTerminal(t *testing.T) {
+	discoverer := &PaperDiscoverer{maxPapers: 1}
+	discoverer.searchSemanticScholarFn = func(context.Context, string, int) ([]DiscoveredPaper, error) {
+		return []DiscoveredPaper{{Source: "semantic_scholar", ExternalID: "paper-1", Title: "Paper"}}, nil
+	}
+	discoverer.searchArXivFn = func(context.Context, string, int, []string) ([]DiscoveredPaper, error) { return nil, nil }
+	discoverer.storePaperFn = func(context.Context, string, DiscoveredPaper) error { return errors.New("database unavailable") }
+	papers, err := discoverer.Discover(context.Background(), "topic", []string{"query"}, nil)
+	if err == nil || len(papers) != 0 {
+		t.Fatalf("Discover() = (%v, %v), want no persisted papers and an error", papers, err)
+	}
+	var batchErr *BatchError
+	if !errors.As(err, &batchErr) || batchErr.Succeeded != 0 || len(batchErr.Failures) != 1 {
+		t.Fatalf("error = %#v, want one persistence failure", err)
 	}
 }

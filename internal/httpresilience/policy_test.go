@@ -44,6 +44,7 @@ func testPolicy(observer Observer) *Policy {
 	}, 0, 0, observer)
 }
 
+// Protects policy retries transient http status.
 func TestPolicyRetriesTransientHTTPStatus(t *testing.T) {
 	attempts := 0
 	observer := &recordingObserver{}
@@ -68,6 +69,7 @@ func TestPolicyRetriesTransientHTTPStatus(t *testing.T) {
 	}
 }
 
+// Protects policy does not retry permanent http status.
 func TestPolicyDoesNotRetryPermanentHTTPStatus(t *testing.T) {
 	attempts := 0
 	resp, err := testPolicy(nil).Do(context.Background(), "test", func(ctx context.Context) (*http.Response, error) {
@@ -87,6 +89,7 @@ func TestPolicyDoesNotRetryPermanentHTTPStatus(t *testing.T) {
 	resp.Body.Close()
 }
 
+// Protects retry after parses seconds and http date.
 func TestRetryAfterParsesSecondsAndHTTPDate(t *testing.T) {
 	seconds := &http.Response{Header: http.Header{"Retry-After": []string{"2"}}}
 	if got := retryAfter(seconds); got != 2*time.Second {
@@ -99,6 +102,7 @@ func TestRetryAfterParsesSecondsAndHTTPDate(t *testing.T) {
 	}
 }
 
+// Protects policy cancellation stops backoff.
 func TestPolicyCancellationStopsBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -127,6 +131,7 @@ func TestPolicyCancellationStopsBackoff(t *testing.T) {
 	}
 }
 
+// Protects rate limiter concurrent throughput.
 func TestRateLimiterConcurrentThroughput(t *testing.T) {
 	limiter := NewTokenBucket(20, 1)
 	const callers = 5

@@ -11,6 +11,7 @@ import (
 	"github.com/paper-scout/internal/config"
 )
 
+// Protects external client policies retry semantic scholar requests.
 func TestExternalClientPoliciesRetrySemanticScholarRequests(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

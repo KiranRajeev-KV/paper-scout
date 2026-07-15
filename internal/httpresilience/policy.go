@@ -1,7 +1,6 @@
 package httpresilience
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -269,11 +268,4 @@ func (b *TokenBucket) refill() {
 		b.tokens = b.maxTokens
 	}
 	b.lastRefill = now
-}
-
-// ResetResponseBody restores a response body after a caller has inspected it.
-func ResetResponseBody(response *http.Response, body []byte) {
-	if response != nil {
-		response.Body = io.NopCloser(bytes.NewReader(body))
-	}
 }

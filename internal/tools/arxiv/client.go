@@ -70,14 +70,17 @@ func (c *Client) Search(ctx context.Context, query string, maxResults int) (*Fee
 		return nil, fmt.Errorf("request returned no response")
 	}
 	defer resp.Body.Close()
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 	if readErr != nil {
 		return nil, fmt.Errorf("failed to read response: %w", readErr)
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	if len(body) > 16<<20 {
+		return nil, fmt.Errorf("response exceeds %d bytes", 16<<20)
 	}
-	logger.Debug().Str("query", query).Int("status", resp.StatusCode).Dur("duration", time.Since(start)).Msg("arXiv API call")
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body[:min(len(body), 1024)]))
+	}
+	logger.From(ctx).Debug().Int("query_chars", len(query)).Int("status", resp.StatusCode).Dur("duration", time.Since(start)).Msg("arXiv API call")
 	var f Feed
 	if err := xml.Unmarshal(body, &f); err != nil {
 		return nil, fmt.Errorf("failed to parse XML: %w", err)
