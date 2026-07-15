@@ -11,12 +11,14 @@ import (
 )
 
 type FeasibilityEvaluator struct {
-	llm        *llm.Client
+	llm        llm.Generator
 	postgres   *postgres.Client
 	structured *llm.StructuredOutput
+	evaluateFn func(context.Context, ResearchGap) (*FeasibilityResult, error)
+	storeFn    func(context.Context, string, ResearchGap, *FeasibilityResult) error
 }
 
-func NewFeasibilityEvaluator(llmClient *llm.Client, pg *postgres.Client) *FeasibilityEvaluator {
+func NewFeasibilityEvaluator(llmClient llm.Generator, pg *postgres.Client) *FeasibilityEvaluator {
 	return &FeasibilityEvaluator{
 		llm:        llmClient,
 		postgres:   pg,
@@ -35,32 +37,44 @@ type FeasibilityResult struct {
 }
 
 func (f *FeasibilityEvaluator) Evaluate(ctx context.Context, topicID string, gaps []ResearchGap) ([]FeasibilityResult, error) {
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
 		Int("gaps", len(gaps)).
 		Msg("Starting feasibility evaluation")
 
 	results := make([]FeasibilityResult, 0, len(gaps))
+	failures := make([]ItemFailure, 0)
 
 	for _, gap := range gaps {
-		result, err := f.evaluateGap(ctx, gap)
+		evaluate := f.evaluateGap
+		if f.evaluateFn != nil {
+			evaluate = f.evaluateFn
+		}
+		result, err := evaluate(ctx, gap)
 		if err != nil {
-			logger.Warn().Err(err).Str("gap", gap.Title).Msg("Failed to evaluate gap feasibility")
+			logger.From(ctx).Warn().Err(err).Str("gap", gap.Title).Msg("Failed to evaluate gap feasibility")
+			failures = append(failures, ItemFailure{Kind: "research_gap", Identifier: gap.Title, Err: err})
+			continue
+		}
+
+		store := f.storeDirection
+		if f.storeFn != nil {
+			store = f.storeFn
+		}
+		if err := store(ctx, topicID, gap, result); err != nil {
+			logger.From(ctx).Warn().Err(err).Str("gap", gap.Title).Msg("Failed to store direction")
+			failures = append(failures, ItemFailure{Kind: "research_direction", Identifier: gap.Title, Err: err})
 			continue
 		}
 
 		results = append(results, *result)
-
-		if err := f.storeDirection(ctx, topicID, gap, result); err != nil {
-			logger.Warn().Err(err).Str("gap", gap.Title).Msg("Failed to store direction")
-		}
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Int("evaluated", len(results)).
 		Msg("Feasibility evaluation complete")
 
-	return results, nil
+	return results, newBatchError("feasibility evaluation", len(gaps), failures)
 }
 
 func (f *FeasibilityEvaluator) evaluateGap(ctx context.Context, gap ResearchGap) (*FeasibilityResult, error) {
@@ -105,6 +119,10 @@ Provide feasibility analysis in JSON format:
 }
 
 func (f *FeasibilityEvaluator) storeDirection(ctx context.Context, topicID string, gap ResearchGap, feasibility *FeasibilityResult) error {
+	topicUUID, err := parseID("topic ID", topicID)
+	if err != nil {
+		return err
+	}
 	var score float64
 	switch feasibility.Difficulty {
 	case "low":
@@ -121,8 +139,8 @@ func (f *FeasibilityEvaluator) storeDirection(ctx context.Context, topicID strin
 	description := fmt.Sprintf("%s\n\n%s", gap.Description, feasibility.Recommendation)
 	rationale := fmt.Sprintf("Based on gap analysis. Evidence: %s", gap.Evidence)
 
-	_, err := f.postgres.Queries().CreateNovelDirection(ctx, postgres.CreateNovelDirectionParams{
-		TopicID:                  pgUUID(topicID),
+	_, err = f.postgres.Queries().CreateNovelDirection(ctx, postgres.CreateNovelDirectionParams{
+		TopicID:                  topicUUID,
 		Title:                    title,
 		Description:              pgText(description),
 		Rationale:                pgText(rationale),
@@ -134,17 +152,4 @@ func (f *FeasibilityEvaluator) storeDirection(ctx context.Context, topicID strin
 	})
 
 	return err
-}
-
-func (f *FeasibilityEvaluator) GetTopDirections(ctx context.Context, topicID string, limit int) ([]*postgres.NovelDirection, error) {
-	directions, err := f.postgres.Queries().GetNovelDirectionsByTopic(ctx, pgUUID(topicID))
-	if err != nil {
-		return nil, err
-	}
-
-	if len(directions) > limit {
-		directions = directions[:limit]
-	}
-
-	return directions, nil
 }

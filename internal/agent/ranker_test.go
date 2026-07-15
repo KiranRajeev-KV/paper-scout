@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 
@@ -11,8 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/paper-scout/internal/storage/postgres"
 	"github.com/paper-scout/internal/tools/embedding"
+	"github.com/paper-scout/internal/worker"
 )
 
+type cleanupReconcilerFunc func(context.Context, int32) (worker.CleanupResult, error)
+
+func (f cleanupReconcilerFunc) ReconcileEmbeddingCleanup(ctx context.Context, limit int32) (worker.CleanupResult, error) {
+	return f(ctx, limit)
+}
+
+// Protects abstract ranking retries cleanup without a PDF embedding batch.
+func TestRankerReconcilesEmbeddingCleanupIndependently(t *testing.T) {
+	called := false
+	ranker := &Ranker{cleanup: cleanupReconcilerFunc(func(_ context.Context, limit int32) (worker.CleanupResult, error) {
+		called = true
+		if limit != 100 {
+			t.Fatalf("cleanup limit = %d, want 100", limit)
+		}
+		return worker.CleanupResult{Pending: 1}, errors.New("retryable cleanup failure")
+	})}
+
+	ranker.reconcileEmbeddingCleanup(context.Background())
+	if !called {
+		t.Fatal("expected abstract ranking to invoke cleanup reconciliation")
+	}
+}
+
+// Protects ranker rank uses qdrant search results.
 func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	paperA := testPaper("paper-a", "Alpha", "alpha abstract")
 	paperB := testPaper("paper-b", "Beta", "beta abstract")
@@ -20,7 +46,6 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	ranker := &Ranker{llm: nil}
 
 	var stored []embedding.PaperEmbedding
-	var embeddingStatuses []string
 	var searchCalled bool
 	updatedScores := make(map[uuid.UUID]float64)
 
@@ -60,11 +85,6 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 		updatedScores[paperID] = score
 		return nil
 	}
-	ranker.updateEmbeddingStatusFn = func(ctx context.Context, paperID uuid.UUID, status string) error {
-		embeddingStatuses = append(embeddingStatuses, status)
-		return nil
-	}
-
 	ranked, err := ranker.Rank(context.Background(), "topic-1", "test topic", 2)
 	if err != nil {
 		t.Fatalf("Rank returned error: %v", err)
@@ -75,14 +95,6 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	}
 	if len(stored) != 2 {
 		t.Fatalf("stored %d embeddings, want 2", len(stored))
-	}
-	for _, status := range embeddingStatuses {
-		if status != EmbeddingStatusCompleted {
-			t.Fatalf("embedding status = %q, want %q", status, EmbeddingStatusCompleted)
-		}
-	}
-	if len(embeddingStatuses) != 2 {
-		t.Fatalf("updated %d embedding statuses, want 2", len(embeddingStatuses))
 	}
 	if stored[0].ChunkType != ChunkTypeAbstract || stored[1].ChunkType != ChunkTypeAbstract {
 		t.Fatalf("unexpected chunk types: %+v", stored)
@@ -99,30 +111,7 @@ func TestRankerRankUsesQdrantSearchResults(t *testing.T) {
 	}
 }
 
-func TestParseRerankResponseValidatesScores(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{name: "out of range", body: `{"scores":[{"index":1,"score":1.1}]}`},
-		{name: "duplicate index", body: `{"scores":[{"index":1,"score":0.5},{"index":1,"score":0.4}]}`},
-		{name: "zero index", body: `{"scores":[{"index":0,"score":0.5}]}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseRerankResponse(tt.body); err == nil {
-				t.Fatal("parseRerankResponse accepted invalid scores")
-			}
-		})
-	}
-
-	valid := `{"scores":[{"index":1,"score":0.5,"reason":"relevant"}]}`
-	if _, err := parseRerankResponse(valid); err != nil {
-		t.Fatalf("parseRerankResponse rejected valid scores: %v", err)
-	}
-}
-
+// Protects validate rerank scores rejects malformed batch.
 func TestValidateRerankScoresRejectsMalformedBatch(t *testing.T) {
 	for name, scores := range map[string][]scoreEntry{
 		"out of range index": {{Index: 3, Score: 0.5}},
@@ -138,6 +127,7 @@ func TestValidateRerankScoresRejectsMalformedBatch(t *testing.T) {
 	}
 }
 
+// Protects ranker rank deduplicates qdrant results by paper.
 func TestRankerRankDeduplicatesQdrantResultsByPaper(t *testing.T) {
 	paper := testPaper("paper-a", "Alpha", "alpha abstract")
 
@@ -166,10 +156,6 @@ func TestRankerRankDeduplicatesQdrantResultsByPaper(t *testing.T) {
 		}
 		return nil
 	}
-	ranker.updateEmbeddingStatusFn = func(ctx context.Context, paperID uuid.UUID, status string) error {
-		return nil
-	}
-
 	ranked, err := ranker.Rank(context.Background(), "topic-1", "test topic", 1)
 	if err != nil {
 		t.Fatalf("Rank returned error: %v", err)
@@ -179,6 +165,16 @@ func TestRankerRankDeduplicatesQdrantResultsByPaper(t *testing.T) {
 	}
 	if !cmp.Equal(ranked[0].RelevanceScore, 0.88, cmpopts.EquateApprox(0, 1e-6)) {
 		t.Fatalf("unexpected relevance score: %f", ranked[0].RelevanceScore)
+	}
+}
+
+// Protects ranking from applying a fixed rerank ceiling below the configured paper limit.
+func TestRankQueryLimitUsesConfiguredLimitOnly(t *testing.T) {
+	if got := rankQueryLimit(75, 0); got != 75 {
+		t.Fatalf("unbounded query limit = %d, want 75", got)
+	}
+	if got := rankQueryLimit(75, 60); got != 60 {
+		t.Fatalf("configured query limit = %d, want 60", got)
 	}
 }
 

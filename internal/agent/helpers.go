@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,13 +10,6 @@ import (
 
 func pgText(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}
-}
-
-func pgTextPtr(s *string) pgtype.Text {
-	if s == nil || *s == "" {
-		return pgtype.Text{Valid: false}
-	}
-	return pgtype.Text{String: *s, Valid: true}
 }
 
 func pgTextVal(t pgtype.Text) string {
@@ -53,31 +47,24 @@ func pgDateVal(d pgtype.Date) int {
 	return 0
 }
 
-func pgUUID(s string) uuid.UUID {
-	id, _ := uuid.Parse(s)
-	return id
-}
-
-func pgUUIDPtr(s string) pgtype.UUID {
-	id, err := uuid.Parse(s)
+func parseID(field, value string) (uuid.UUID, error) {
+	id, err := uuid.Parse(value)
 	if err != nil {
-		return pgtype.UUID{Valid: false}
+		return uuid.Nil, fmt.Errorf("invalid %s %q: %w", field, value, err)
 	}
-	return pgtype.UUID{Bytes: id, Valid: true}
+	return id, nil
 }
 
-func pgUUIDsFromStrings(ids []string) []uuid.UUID {
+func parseIDs(field string, ids []string) ([]uuid.UUID, error) {
 	result := make([]uuid.UUID, 0, len(ids))
 	for _, id := range ids {
-		if u, err := uuid.Parse(id); err == nil {
-			result = append(result, u)
+		u, err := parseID(field, id)
+		if err != nil {
+			return nil, err
 		}
+		result = append(result, u)
 	}
-	return result
-}
-
-func pgBool(b bool) pgtype.Bool {
-	return pgtype.Bool{Bool: b, Valid: true}
+	return result, nil
 }
 
 func truncateText(text string, maxChars int) string {

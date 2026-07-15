@@ -1,3 +1,4 @@
+-- +goose Up
 -- Persist the current workflow snapshot in PostgreSQL, independent of Redis.
 
 ALTER TABLE research_topics
@@ -5,3 +6,8 @@ ALTER TABLE research_topics
     ADD COLUMN progress DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
     ADD COLUMN error_message TEXT;
 
+-- +goose Down
+ALTER TABLE research_topics
+    DROP COLUMN IF EXISTS error_message,
+    DROP COLUMN IF EXISTS progress,
+    DROP COLUMN IF EXISTS current_stage;

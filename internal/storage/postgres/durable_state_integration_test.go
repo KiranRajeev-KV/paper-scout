@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Protects durable pipeline failure state is atomic.
 func TestDurablePipelineFailureStateIsAtomic(t *testing.T) {
 	dsn := os.Getenv("PAPER_SCOUT_TEST_POSTGRES_DSN")
 	if dsn == "" {
@@ -124,6 +125,7 @@ func TestDurablePipelineFailureStateIsAtomic(t *testing.T) {
 
 }
 
+// Protects create paper supports same paper across topics.
 func TestCreatePaperSupportsSamePaperAcrossTopics(t *testing.T) {
 	dsn := os.Getenv("PAPER_SCOUT_TEST_POSTGRES_DSN")
 	if dsn == "" {
@@ -181,7 +183,8 @@ func TestCreatePaperSupportsSamePaperAcrossTopics(t *testing.T) {
 	}
 }
 
-func TestEmbeddingCompletedStatusSatisfiesConstraint(t *testing.T) {
+// Protects embedding status is owned independently by each topic chunk.
+func TestEmbeddingStatusIsTopicScoped(t *testing.T) {
 	dsn := os.Getenv("PAPER_SCOUT_TEST_POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("PAPER_SCOUT_TEST_POSTGRES_DSN is not set")
@@ -194,25 +197,51 @@ func TestEmbeddingCompletedStatusSatisfiesConstraint(t *testing.T) {
 	}
 	defer pool.Close()
 	queries := New(pool)
-	topic, err := queries.CreateResearchTopic(ctx, CreateResearchTopicParams{Topic: "embedding status integration test", Status: "pending"})
+	topicA, err := queries.CreateResearchTopic(ctx, CreateResearchTopicParams{Topic: "embedding status topic A", Status: "pending"})
 	if err != nil {
-		t.Fatalf("create topic: %v", err)
+		t.Fatalf("create topic A: %v", err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM research_topics WHERE id = $1", topic.ID) })
+	topicB, err := queries.CreateResearchTopic(ctx, CreateResearchTopicParams{Topic: "embedding status topic B", Status: "pending"})
+	if err != nil {
+		t.Fatalf("create topic B: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM research_topics WHERE id = ANY($1)", []uuid.UUID{topicA.ID, topicB.ID})
+	})
 
 	paperID, err := queries.CreatePaper(ctx, CreatePaperParams{
-		TopicID: topic.ID, DiscoverySource: "arxiv", ExternalID: "test-embedding-status", Title: "Embedding status paper",
+		TopicID: topicA.ID, DiscoverySource: "arxiv", ExternalID: "test-topic-scoped-embedding-status", Title: "Embedding status paper",
 	})
 	if err != nil {
 		t.Fatalf("create paper: %v", err)
 	}
-	paper, err := queries.UpdatePaperEmbeddingStatus(ctx, UpdatePaperEmbeddingStatusParams{
-		ID: paperID, EmbeddingStatus: pgtype.Text{String: "completed", Valid: true},
-	})
-	if err != nil {
-		t.Fatalf("mark embedding completed: %v", err)
+	if _, err := queries.CreatePaper(ctx, CreatePaperParams{
+		TopicID: topicB.ID, DiscoverySource: "arxiv", ExternalID: "test-topic-scoped-embedding-status", Title: "Embedding status paper",
+	}); err != nil {
+		t.Fatalf("attach paper to topic B: %v", err)
 	}
-	if !paper.EmbeddingStatus.Valid || paper.EmbeddingStatus.String != "completed" {
-		t.Fatalf("embedding status = %#v, want completed", paper.EmbeddingStatus)
+	for _, topicID := range []uuid.UUID{topicA.ID, topicB.ID} {
+		if _, err := queries.UpsertPaperChunk(ctx, UpsertPaperChunkParams{
+			TopicID: topicID, PaperID: paperID, ChunkType: "abstract", Text: "shared abstract",
+			ContentHash: "shared-hash", Source: "paper_metadata",
+		}); err != nil {
+			t.Fatalf("create chunk for topic %s: %v", topicID, err)
+		}
+	}
+	chunksA, err := queries.GetPaperChunks(ctx, GetPaperChunksParams{TopicID: topicA.ID, PaperID: paperID})
+	if err != nil || len(chunksA) != 1 {
+		t.Fatalf("load topic A chunk: chunks=%d err=%v", len(chunksA), err)
+	}
+	if _, err := queries.UpdatePaperChunkEmbeddingStatus(ctx, UpdatePaperChunkEmbeddingStatusParams{
+		TopicID: topicA.ID, ID: chunksA[0].ID, EmbeddingStatus: "completed",
+	}); err != nil {
+		t.Fatalf("complete topic A chunk: %v", err)
+	}
+	chunksB, err := queries.GetPaperChunks(ctx, GetPaperChunksParams{TopicID: topicB.ID, PaperID: paperID})
+	if err != nil {
+		t.Fatalf("load topic B chunk: %v", err)
+	}
+	if len(chunksB) != 1 || chunksB[0].EmbeddingStatus != "pending" {
+		t.Fatalf("topic B chunks = %#v, want one pending chunk", chunksB)
 	}
 }

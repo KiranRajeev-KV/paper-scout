@@ -2,12 +2,16 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/redis"
+	goredis "github.com/redis/go-redis/v9"
 )
+
+var ErrStateNotFound = errors.New("pipeline state not found")
 
 type StateManager struct {
 	redis *redis.Client
@@ -33,7 +37,7 @@ func (s *StateManager) Save(ctx context.Context, topicID string, pipeline *Pipel
 	}
 
 	if err := s.redis.SetJSON(ctx, key, state, 24*time.Hour); err != nil {
-		logger.Warn().Err(err).Str("topic_id", topicID).Msg("Failed to save pipeline state")
+		logger.From(ctx).Warn().Err(err).Str("topic_id", topicID).Msg("Failed to save pipeline state")
 		return err
 	}
 
@@ -45,6 +49,9 @@ func (s *StateManager) Load(ctx context.Context, topicID string) (*Pipeline, err
 
 	var state PipelineState
 	if err := s.redis.GetJSON(ctx, key, &state); err != nil {
+		if errors.Is(err, goredis.Nil) {
+			return nil, ErrStateNotFound
+		}
 		return nil, err
 	}
 
@@ -81,7 +88,7 @@ func (s *StateManager) ListRecoverable(ctx context.Context) ([]*Pipeline, error)
 		for _, key := range keys {
 			var state PipelineState
 			if err := s.redis.GetJSON(ctx, key, &state); err != nil {
-				logger.Warn().Err(err).Str("key", key).Msg("Failed to load pipeline state during recovery scan")
+				logger.From(ctx).Warn().Err(err).Str("key", key).Msg("Failed to load pipeline state during recovery scan")
 				continue
 			}
 

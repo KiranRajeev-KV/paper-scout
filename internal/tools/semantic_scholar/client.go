@@ -67,14 +67,17 @@ func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Valu
 		return nil, fmt.Errorf("request returned no response")
 	}
 	defer resp.Body.Close()
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 	if readErr != nil {
 		return nil, fmt.Errorf("failed to read response: %w", readErr)
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	if len(body) > 16<<20 {
+		return nil, fmt.Errorf("response exceeds %d bytes", 16<<20)
 	}
-	logger.Debug().Str("endpoint", endpoint).Int("status", resp.StatusCode).Msg("Semantic Scholar API call")
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body[:min(len(body), 1024)]))
+	}
+	logger.From(ctx).Debug().Str("endpoint", endpoint).Int("status", resp.StatusCode).Msg("Semantic Scholar API call")
 	return body, nil
 }
 
@@ -156,12 +159,15 @@ func (c *Client) GetPapersBatch(ctx context.Context, paperIDs []string) ([]Paper
 		return nil, fmt.Errorf("request returned no response")
 	}
 	defer resp.Body.Close()
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 	if readErr != nil {
 		return nil, fmt.Errorf("failed to read response: %w", readErr)
 	}
+	if len(body) > 16<<20 {
+		return nil, fmt.Errorf("response exceeds %d bytes", 16<<20)
+	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body[:min(len(body), 1024)]))
 	}
 	if err := json.Unmarshal(body, &papers); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)

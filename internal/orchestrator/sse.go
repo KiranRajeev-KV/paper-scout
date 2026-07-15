@@ -9,6 +9,7 @@ import (
 
 type SSEManager struct {
 	clients map[string]map[chan []byte]struct{}
+	closed  bool
 	mu      sync.RWMutex
 }
 
@@ -21,17 +22,39 @@ func NewSSEManager() *SSEManager {
 func (s *SSEManager) Subscribe(topicID string) chan []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ch := make(chan []byte, 100)
+	if s.closed {
+		close(ch)
+		return ch
+	}
 
 	if s.clients[topicID] == nil {
 		s.clients[topicID] = make(map[chan []byte]struct{})
 	}
 
-	ch := make(chan []byte, 100)
 	s.clients[topicID][ch] = struct{}{}
 
 	logger.Debug().Str("topic_id", topicID).Int("subscribers", len(s.clients[topicID])).Msg("SSE client subscribed")
 
 	return ch
+}
+
+// CloseAll releases every active stream during HTTP server shutdown. New
+// subscribers receive a closed channel so a handler racing shutdown exits.
+func (s *SSEManager) CloseAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+	for _, clients := range s.clients {
+		for ch := range clients {
+			close(ch)
+		}
+	}
+	s.clients = make(map[string]map[chan []byte]struct{})
+	s.closed = true
 }
 
 func (s *SSEManager) Unsubscribe(topicID string, ch chan []byte) {
@@ -67,10 +90,16 @@ func (s *SSEManager) Broadcast(event interface{}) {
 		return
 	}
 
+	if err := s.Send(topicID, eventType, event); err != nil {
+		logger.Warn().Err(err).Msg("Failed to marshal SSE event")
+	}
+}
+
+// Send publishes a typed event without blocking on slow subscribers.
+func (s *SSEManager) Send(topicID, eventType string, event interface{}) error {
 	data, err := json.Marshal(event)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to marshal SSE event")
-		return
+		return err
 	}
 
 	message := formatSSE(eventType, data)
@@ -85,6 +114,7 @@ func (s *SSEManager) Broadcast(event interface{}) {
 			logger.Warn().Str("topic_id", topicID).Msg("SSE channel full, dropping message")
 		}
 	}
+	return nil
 }
 
 func (s *SSEManager) BroadcastToAll(event interface{}) {

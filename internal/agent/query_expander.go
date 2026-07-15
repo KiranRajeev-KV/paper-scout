@@ -11,12 +11,12 @@ import (
 )
 
 type QueryExpander struct {
-	llm        *llm.Client
+	llm        llm.Generator
 	postgres   *postgres.Client
 	structured *llm.StructuredOutput
 }
 
-func NewQueryExpander(llmClient *llm.Client, pg *postgres.Client) *QueryExpander {
+func NewQueryExpander(llmClient llm.Generator, pg *postgres.Client) *QueryExpander {
 	return &QueryExpander{
 		llm:        llmClient,
 		postgres:   pg,
@@ -32,9 +32,9 @@ type ExpandedQuery struct {
 }
 
 func (e *QueryExpander) Expand(ctx context.Context, topicID string, topic string) (*ExpandedQuery, error) {
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
-		Str("topic", topic).
+		Int("topic_chars", len(topic)).
 		Msg("Expanding research topic")
 
 	prompt := fmt.Sprintf(`You are a research assistant. Given a research topic, generate:
@@ -73,16 +73,23 @@ Respond in JSON format:
 		expanded.Queries = []string{topic}
 	}
 
-	expandedJSON, _ := json.Marshal(expanded)
+	expandedJSON, err := json.Marshal(expanded)
+	if err != nil {
+		return nil, fmt.Errorf("marshal expanded query: %w", err)
+	}
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return nil, err
+	}
 	_, err = e.postgres.Queries().UpdateResearchTopicExpandedQueries(ctx, postgres.UpdateResearchTopicExpandedQueriesParams{
-		ID:              pgUUID(topicID),
+		ID:              id,
 		ExpandedQueries: expandedJSON,
 	})
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to update expanded queries in DB")
+		return nil, fmt.Errorf("persist expanded queries: %w", err)
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Int("queries", len(expanded.Queries)).
 		Int("concepts", len(expanded.RelatedConcepts)).
 		Int("keywords", len(expanded.Keywords)).

@@ -9,23 +9,44 @@ import (
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
-	"github.com/paper-scout/internal/logger"
 )
 
+type envValueParser func(string) (interface{}, error)
+
+var environmentValueParsers = map[string]envValueParser{
+	"server.allowed_origins": parseAllowedOrigins,
+}
+
+var environmentRoots = map[string]struct{}{
+	"server":      {},
+	"database":    {},
+	"generation":  {},
+	"embedding":   {},
+	"accelerator": {},
+	"apis":        {},
+	"pipeline":    {},
+	"logging":     {},
+}
+
 type Config struct {
-	Server   ServerConfig   `koanf:"server"`
-	Database DatabaseConfig `koanf:"database"`
-	LLM      LLMConfig      `koanf:"llm"`
-	APIs     APIsConfig     `koanf:"apis"`
-	Pipeline PipelineConfig `koanf:"pipeline"`
-	Logging  LoggingConfig  `koanf:"logging"`
+	Server      ServerConfig      `koanf:"server"`
+	Database    DatabaseConfig    `koanf:"database"`
+	Generation  GenerationConfig  `koanf:"generation"`
+	Embedding   EmbeddingConfig   `koanf:"embedding"`
+	Accelerator AcceleratorConfig `koanf:"accelerator"`
+	APIs        APIsConfig        `koanf:"apis"`
+	Pipeline    PipelineConfig    `koanf:"pipeline"`
+	Logging     LoggingConfig     `koanf:"logging"`
 }
 
 type ServerConfig struct {
-	Host         string        `koanf:"host"`
-	Port         int           `koanf:"port"`
-	ReadTimeout  time.Duration `koanf:"read_timeout"`
-	WriteTimeout time.Duration `koanf:"write_timeout"`
+	Host            string        `koanf:"host"`
+	Port            int           `koanf:"port"`
+	ReadTimeout     time.Duration `koanf:"read_timeout"`
+	WriteTimeout    time.Duration `koanf:"write_timeout"`
+	AllowedOrigins  []string      `koanf:"allowed_origins"`
+	SubmissionRate  float64       `koanf:"submission_rate"`
+	SubmissionBurst int           `koanf:"submission_burst"`
 }
 
 type DatabaseConfig struct {
@@ -54,11 +75,12 @@ func (p PostgresConfig) DSN() string {
 }
 
 type RedisConfig struct {
-	Host     string `koanf:"host"`
-	Port     int    `koanf:"port"`
-	Password string `koanf:"password"`
-	DB       int    `koanf:"db"`
-	PoolSize int    `koanf:"pool_size"`
+	Host           string `koanf:"host"`
+	Port           int    `koanf:"port"`
+	Password       string `koanf:"password"`
+	DB             int    `koanf:"db"`
+	PoolSize       int    `koanf:"pool_size"`
+	WorkerPoolSize int    `koanf:"worker_pool_size"`
 }
 
 func (r RedisConfig) Addr() string {
@@ -66,22 +88,27 @@ func (r RedisConfig) Addr() string {
 }
 
 type QdrantConfig struct {
-	Host       string `koanf:"host"`
-	Port       int    `koanf:"port"`
-	Collection string `koanf:"collection"`
-	APIKey     string `koanf:"api_key"`
-	UseTLS     bool   `koanf:"use_tls"`
+	Host             string `koanf:"host"`
+	Port             int    `koanf:"port"`
+	Alias            string `koanf:"alias"`
+	CollectionPrefix string `koanf:"collection_prefix"`
+	APIKey           string `koanf:"api_key"`
+	UseTLS           bool   `koanf:"use_tls"`
 }
 
 func (q QdrantConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", q.Host, q.Port)
 }
 
-type LLMConfig struct {
-	Provider          string        `koanf:"provider"`
+type GenerationConfig struct {
+	Provider string                 `koanf:"provider"`
+	Gemini   GeminiConfig           `koanf:"gemini"`
+	Ollama   OllamaGenerationConfig `koanf:"ollama"`
+}
+
+type GeminiConfig struct {
 	APIKey            string        `koanf:"api_key"`
 	Model             string        `koanf:"model"`
-	EmbeddingModel    string        `koanf:"embedding_model"`
 	MaxRetries        int           `koanf:"max_retries"`
 	BaseBackoff       time.Duration `koanf:"base_backoff"`
 	MaxBackoff        time.Duration `koanf:"max_backoff"`
@@ -91,10 +118,41 @@ type LLMConfig struct {
 	RequestsPerDay    int           `koanf:"requests_per_day"`
 }
 
+// LLMConfig remains an internal compatibility alias while Gemini is isolated.
+type LLMConfig = GeminiConfig
+
+type OllamaGenerationConfig struct {
+	BaseURL         string        `koanf:"base_url"`
+	Model           string        `koanf:"model"`
+	Timeout         time.Duration `koanf:"timeout"`
+	KeepAlive       string        `koanf:"keep_alive"`
+	Concurrency     int           `koanf:"concurrency"`
+	Think           bool          `koanf:"think"`
+	MaxOutputTokens int           `koanf:"max_output_tokens"`
+	Temperature     float64       `koanf:"temperature"`
+}
+
+type EmbeddingConfig struct {
+	Provider           string        `koanf:"provider"`
+	BaseURL            string        `koanf:"base_url"`
+	Model              string        `koanf:"model"`
+	Timeout            time.Duration `koanf:"timeout"`
+	KeepAlive          string        `koanf:"keep_alive"`
+	Concurrency        int           `koanf:"concurrency"`
+	Dimensions         int           `koanf:"dimensions"`
+	QueryInstruction   string        `koanf:"query_instruction"`
+	InstructionVersion string        `koanf:"instruction_version"`
+	IndexingVersion    string        `koanf:"indexing_version"`
+}
+
+type AcceleratorConfig struct {
+	MaxConcurrent int `koanf:"max_concurrent"`
+}
+
 type APIsConfig struct {
 	SemanticScholar SemanticScholarConfig `koanf:"semantic_scholar"`
 	ArXiv           ArXivConfig           `koanf:"arxiv"`
-	Grobid          GrobidConfig          `koanf:"grobid"`
+	Docling         DoclingConfig         `koanf:"docling"`
 }
 
 type RateLimitConfig struct {
@@ -125,19 +183,22 @@ type ArXivConfig struct {
 	Timeout    time.Duration    `koanf:"timeout"`
 }
 
-type GrobidConfig struct {
-	BaseURL          string           `koanf:"base_url"`
-	RateLimit        RateLimitConfig  `koanf:"rate_limit"`
-	Resilience       ResilienceConfig `koanf:"resilience"`
-	Timeout          time.Duration    `koanf:"timeout"`
-	MaxResponseBytes int64            `koanf:"max_response_bytes"`
+type DoclingConfig struct {
+	BaseURL                string        `koanf:"base_url"`
+	RequestTimeout         time.Duration `koanf:"request_timeout"`
+	DocumentTimeout        time.Duration `koanf:"document_timeout"`
+	OCRBehavior            string        `koanf:"ocr_behavior"`
+	OutputFormat           string        `koanf:"output_format"`
+	Concurrency            int           `koanf:"concurrency"`
+	Version                string        `koanf:"version"`
+	MaxResponseBytes       int64         `koanf:"max_response_bytes"`
+	MinExtractedCharacters int           `koanf:"min_extracted_characters"`
 }
 
 type PipelineConfig struct {
 	MaxPapers            int              `koanf:"max_papers"`
 	MinPapersForAnalysis int              `koanf:"min_papers_for_analysis"`
 	PapersToAnalyze      int              `koanf:"papers_to_analyze"`
-	AnalysisDelay        time.Duration    `koanf:"analysis_delay"`
 	WorkerPoolSize       int              `koanf:"worker_pool_size"`
 	JobTimeout           time.Duration    `koanf:"job_timeout"`
 	PDFDownloadTimeout   time.Duration    `koanf:"pdf_download_timeout"`
@@ -153,8 +214,9 @@ type PipelineConfig struct {
 }
 
 type LoggingConfig struct {
-	Level  string `koanf:"level"`
-	Format string `koanf:"format"`
+	Level     string `koanf:"level"`
+	Format    string `koanf:"format"`
+	Directory string `koanf:"directory"`
 }
 
 func Load(configPath string) (*Config, error) {
@@ -164,15 +226,33 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to load config file: %w", err)
 	}
 
+	var bindingErr error
 	if err := k.Load(env.ProviderWithValue("", ".", func(s string, v string) (string, interface{}) {
-		key := strings.ToLower(s)
-		key = strings.ReplaceAll(key, "__", ".")
-		if strings.Contains(v, ",") {
-			return key, strings.Split(v, ",")
+		key := strings.ToLower(strings.ReplaceAll(s, "__", "."))
+		root, remainder, found := strings.Cut(key, ".")
+		if !found || remainder == "" {
+			return "", nil
 		}
-		return key, v
+		if _, ok := environmentRoots[root]; !ok {
+			return "", nil
+		}
+
+		parser, ok := environmentValueParsers[key]
+		if !ok {
+			return key, v
+		}
+
+		parsed, err := parser(v)
+		if err != nil {
+			bindingErr = fmt.Errorf("invalid environment variable %s: %w", s, err)
+			return "", nil
+		}
+		return key, parsed
 	}), nil); err != nil {
 		return nil, fmt.Errorf("failed to load env vars: %w", err)
+	}
+	if bindingErr != nil {
+		return nil, bindingErr
 	}
 
 	var cfg Config
@@ -187,15 +267,13 @@ func LoadDefault() (*Config, error) {
 	return Load("config/default.yaml")
 }
 
-func (c *Config) ApplyLogging() {
-	logger.SetLevel(c.Logging.Level)
-	if c.Logging.Format == "console" || c.Logging.Format == "development" {
-		logger.SetDevelopment()
-	} else {
-		logger.SetProduction()
+func parseAllowedOrigins(value string) (interface{}, error) {
+	origins := strings.Split(value, ",")
+	for i, origin := range origins {
+		origins[i] = strings.TrimSpace(origin)
+		if origins[i] == "" {
+			return nil, fmt.Errorf("must be a comma-separated list without empty values")
+		}
 	}
-	logger.Info().
-		Str("level", c.Logging.Level).
-		Str("format", c.Logging.Format).
-		Msg("Logger initialized")
+	return origins, nil
 }

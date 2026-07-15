@@ -1,4 +1,38 @@
 services:
+  app:
+    profiles: [app]
+    build:
+      context: .
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER__HOST: 0.0.0.0
+      DATABASE__POSTGRES__HOST: postgres
+      DATABASE__REDIS__HOST: redis
+      DATABASE__QDRANT__HOST: qdrant
+      APIS__DOCLING__BASE_URL: http://docling:5001
+      GENERATION__PROVIDER: ${GENERATION__PROVIDER:-ollama}
+      GENERATION__GEMINI__API_KEY: ${GEMINI_API_KEY:-}
+      GENERATION__OLLAMA__BASE_URL: http://host.docker.internal:11434
+      GENERATION__OLLAMA__MODEL: ${OLLAMA_GENERATION_MODEL:-qwen3.5:4b-q4_K_M}
+      EMBEDDING__BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - app_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      docling:
+        condition: service_healthy
+    networks:
+      - research-net
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     ports:
@@ -9,7 +43,6 @@ services:
       POSTGRES_DB: research_agent
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U research -d research_agent"]
       interval: 5s
@@ -36,7 +69,7 @@ services:
     restart: unless-stopped
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -51,15 +84,31 @@ services:
       - research-net
     restart: unless-stopped
 
-  grobid:
-    image: lfoppiano/grobid:0.8.1
+  docling:
+    image: quay.io/docling-project/docling-serve-cu128:v1.21.0
     ports:
-      - "8070:8070"
+      - "8000:5001"
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:5001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     networks:
       - research-net
     restart: unless-stopped
 
 volumes:
+  app_logs:
   postgres_data:
   redis_data:
   qdrant_data:

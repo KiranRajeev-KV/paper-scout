@@ -11,6 +11,7 @@ import (
 	"github.com/paper-scout/internal/worker"
 )
 
+// Protects analyzer analyze waits for worker completion.
 func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 	pool := worker.NewPool(2, 8)
 	analyzer := NewAnalyzer(nil, nil, pool)
@@ -32,7 +33,9 @@ func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 
 	pool.SetHandler(analyzer.HandleJob)
 	pool.SetCompletionHook(analyzer.HandleJobCompletion)
-	pool.Start()
+	if err := pool.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer pool.Stop()
 
 	papers := []AnalysisPaper{
@@ -61,7 +64,51 @@ func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 	}
 }
 
-func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
+// Protects analysis jobs from consuming their timeout while queued behind another LLM request.
+func TestAnalyzerAnalyzeSerializesLLMJobs(t *testing.T) {
+	pool := worker.NewPool(3, 8)
+	analyzer := NewAnalyzer(nil, nil, pool)
+
+	var mu sync.Mutex
+	active := 0
+	peak := 0
+	analyzer.analyzeFn = func(context.Context, string, string, string) (*PaperAnalysis, error) {
+		mu.Lock()
+		active++
+		if active > peak {
+			peak = active
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return &PaperAnalysis{ProblemStatement: "ok"}, nil
+	}
+	analyzer.storeFn = func(context.Context, string, string, *PaperAnalysis) error { return nil }
+
+	pool.SetHandler(analyzer.HandleJob)
+	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	if err := pool.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Stop()
+
+	err := analyzer.Analyze(context.Background(), "topic-serial", []AnalysisPaper{
+		{ID: "paper-1", Abstract: "one"},
+		{ID: "paper-2", Abstract: "two"},
+		{ID: "paper-3", Abstract: "three"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if peak != 1 {
+		t.Fatalf("peak active analyses = %d, want 1", peak)
+	}
+}
+
+// Protects analyzer analyze returns typed batch error after paper failures.
+func TestAnalyzerAnalyzeReturnsTypedBatchErrorAfterPaperFailures(t *testing.T) {
 	pool := worker.NewPool(1, 4)
 	analyzer := NewAnalyzer(nil, nil, pool)
 
@@ -84,7 +131,9 @@ func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
 
 	pool.SetHandler(analyzer.HandleJob)
 	pool.SetCompletionHook(analyzer.HandleJobCompletion)
-	pool.Start()
+	if err := pool.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer pool.Stop()
 
 	papers := []AnalysisPaper{
@@ -92,12 +141,20 @@ func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
 		{ID: "paper-fail", Abstract: "fail"},
 	}
 
-	if err := analyzer.Analyze(context.Background(), "topic-2", papers, func(completed, total int) {
+	err := analyzer.Analyze(context.Background(), "topic-2", papers, func(completed, total int) {
 		mu.Lock()
 		defer mu.Unlock()
 		progress = append(progress, completed)
-	}); err != nil {
-		t.Fatalf("Analyze returned error: %v", err)
+	})
+	var batchErr *BatchError
+	if !errors.As(err, &batchErr) {
+		t.Fatalf("Analyze error = %v, want *BatchError", err)
+	}
+	if batchErr.Total != 2 || batchErr.Succeeded != 1 || len(batchErr.Failures) != 1 {
+		t.Fatalf("batch error = %#v, want 1 of 2 successful with one failure", batchErr)
+	}
+	if batchErr.Failures[0].Identifier != "paper-fail" || !strings.Contains(batchErr.Error(), "analysis failed") {
+		t.Fatalf("batch failure = %#v, want paper-fail cause", batchErr.Failures[0])
 	}
 
 	mu.Lock()
@@ -112,6 +169,19 @@ func TestAnalyzerAnalyzeContinuesOnPaperFailures(t *testing.T) {
 	}
 }
 
+// Protects analyzer analyze empty batch returns immediately.
+func TestAnalyzerAnalyzeEmptyBatchReturnsImmediately(t *testing.T) {
+	pool := worker.NewPool(1, 1)
+	analyzer := NewAnalyzer(nil, nil, pool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := analyzer.Analyze(ctx, "topic-empty", nil, nil); err != nil {
+		t.Fatalf("Analyze returned error for empty batch: %v", err)
+	}
+}
+
+// Protects multiple analysis batches.
 func TestMultipleAnalysisBatches(t *testing.T) {
 	pool := worker.NewPool(2, 8)
 	analyzer := NewAnalyzer(nil, nil, pool)
@@ -122,7 +192,9 @@ func TestMultipleAnalysisBatches(t *testing.T) {
 	analyzer.storeFn = func(context.Context, string, string, *PaperAnalysis) error { return nil }
 	pool.SetHandler(analyzer.HandleJob)
 	pool.SetCompletionHook(analyzer.HandleJobCompletion)
-	pool.Start()
+	if err := pool.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer pool.Stop()
 
 	var wg sync.WaitGroup
@@ -152,6 +224,7 @@ func TestMultipleAnalysisBatches(t *testing.T) {
 	}
 }
 
+// Protects analyzer handle job uses payload metadata.
 func TestAnalyzerHandleJobUsesPayloadMetadata(t *testing.T) {
 	analyzer := NewAnalyzer(nil, nil, nil)
 
@@ -185,6 +258,7 @@ func TestAnalyzerHandleJobUsesPayloadMetadata(t *testing.T) {
 	}
 }
 
+// Protects analyzer analyze sync uses abstract only.
 func TestAnalyzerAnalyzeSyncUsesAbstractOnly(t *testing.T) {
 	analyzer := NewAnalyzer(nil, nil, nil)
 
@@ -210,6 +284,7 @@ func validAnalysisResponse() string {
 	return `{"problem_statement":"problem","methodology":"method","dataset":"dataset","evaluation_metrics":["accuracy","f1"],"key_findings":"finding","limitations":"limitation","future_work":"future work"}`
 }
 
+// Protects validate paper analysis response rejects malformed output.
 func TestValidatePaperAnalysisResponseRejectsMalformedOutput(t *testing.T) {
 	valid := func() paperAnalysisResponse {
 		return paperAnalysisResponse{
@@ -228,7 +303,6 @@ func TestValidatePaperAnalysisResponseRejectsMalformedOutput(t *testing.T) {
 		"empty required field":   func(response *paperAnalysisResponse) { response.Methodology = stringPtr(" ") },
 		"missing metrics":        func(response *paperAnalysisResponse) { response.EvaluationMetrics = nil },
 		"empty metric":           func(response *paperAnalysisResponse) { response.EvaluationMetrics = &[]string{""} },
-		"oversized field":        func(response *paperAnalysisResponse) { response.Dataset = stringPtr(strings.Repeat("界", 51)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := valid()
@@ -237,5 +311,26 @@ func TestValidatePaperAnalysisResponseRejectsMalformedOutput(t *testing.T) {
 				t.Fatal("validation accepted malformed analysis")
 			}
 		})
+	}
+}
+
+// Protects analysis validation accepts long fields but bounds the complete payload.
+func TestValidatePaperAnalysisResponseBoundsOverallPayload(t *testing.T) {
+	response := paperAnalysisResponse{
+		ProblemStatement:  stringPtr("problem"),
+		Methodology:       stringPtr("method"),
+		Dataset:           stringPtr("dataset"),
+		EvaluationMetrics: &[]string{"accuracy"},
+		KeyFindings:       stringPtr("finding"),
+		Limitations:       stringPtr(strings.Repeat("x", 81)),
+		FutureWork:        stringPtr("future"),
+	}
+	if _, err := validatePaperAnalysisResponse(response); err != nil {
+		t.Fatalf("validation rejected a long limitations field: %v", err)
+	}
+
+	response.Limitations = stringPtr(strings.Repeat("x", maxPaperAnalysisBytes))
+	if _, err := validatePaperAnalysisResponse(response); err == nil {
+		t.Fatal("validation accepted an oversized analysis payload")
 	}
 }

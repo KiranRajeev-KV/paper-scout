@@ -3,6 +3,11 @@ server:
   port: 8080
   read_timeout: 30s
   write_timeout: 30s
+  allowed_origins:
+    - http://localhost:3000
+    - http://localhost:8080
+  submission_rate: 0.1
+  submission_burst: 2
 
 database:
   postgres:
@@ -21,33 +26,62 @@ database:
     port: 6379
     password: ""
     db: 0
+    # Used by pipeline snapshots, acknowledgements, and readiness checks.
     pool_size: 10
+    # Reserved for blocking Redis Streams consumers (XREADGROUP BLOCK).
+    worker_pool_size: 10
 
   qdrant:
     host: localhost
     port: 6334
-    collection: default
+    alias: paper_embeddings_current
+    collection_prefix: paper_embeddings
     api_key: ""
     use_tls: false
 
-llm:
-  provider: gemini
-  api_key: ""
-  model: gemini-2.5-flash
-  embedding_model: gemini-embedding-001
-  max_retries: 3
-  base_backoff: 500ms
-  max_backoff: 2s
-  timeout: 30s
-  max_output_tokens: 512
-  requests_per_minute: 15
-  requests_per_day: 1000
+generation:
+  provider: ollama
+  gemini:
+    api_key: ""
+    model: gemini-2.5-flash
+    max_retries: 3
+    base_backoff: 500ms
+    max_backoff: 2s
+    timeout: 30s
+    max_output_tokens: 512
+    requests_per_minute: 15
+    requests_per_day: 1000
+  ollama:
+    base_url: http://localhost:11434
+    model: qwen3.5:4b-q4_K_M
+    timeout: 2m
+    keep_alive: 5m
+    concurrency: 1
+    think: false
+    max_output_tokens: 1024
+    temperature: 0
+
+embedding:
+  provider: ollama
+  base_url: http://localhost:11434
+  model: qwen3-embedding:8b
+  timeout: 2m
+  keep_alive: 0
+  concurrency: 1
+  dimensions: 4096
+  query_instruction: Given an academic research topic, retrieve relevant academic-paper abstracts and passages
+  instruction_version: qwen3-retrieval-v1
+  indexing_version: v1
+
+accelerator:
+  max_concurrent: 1
 
 apis:
   semantic_scholar:
     api_key: ""
     base_url: "https://api.semanticscholar.org/graph/v1"
     rate_limit:
+      # Unauthenticated clients share Semantic Scholar's nominal 1,000-RPS pool and can be throttled below it.
       requests_per_second: 0.33
       burst: 1
     resilience:
@@ -71,27 +105,23 @@ apis:
       open_timeout: 30s
     timeout: 60s
 
-  grobid:
-    base_url: "http://localhost:8070"
-    rate_limit:
-      requests_per_second: 0.2
-      burst: 1
-    resilience:
-      max_retries: 2
-      base_backoff: 1s
-      max_backoff: 10s
-      failure_threshold: 5
-      open_timeout: 30s
-    timeout: 60s
-    max_response_bytes: 16777216
+  docling:
+    base_url: "http://localhost:8000"
+    request_timeout: 10m
+    document_timeout: 9m
+    ocr_behavior: fallback
+    output_format: md
+    concurrency: 1
+    version: 1.21.0
+    max_response_bytes: 33554432
+    min_extracted_characters: 200
 
 pipeline:
   max_papers: 50
   min_papers_for_analysis: 5
   papers_to_analyze: 20
-  analysis_delay: 4s
   worker_pool_size: 10
-  job_timeout: 60s
+  job_timeout: 10m
   pdf_download_timeout: 15s
   pdf_max_bytes: 52428800
   pdf_rate_limit:
@@ -108,8 +138,9 @@ pipeline:
   max_retrieved_chunks: 12
   pdf_indexing_timeout: 10m
   embedding_batch_size: 10
-  use_redis_queue: false
+  use_redis_queue: true
 
 logging:
   level: info
   format: console
+  directory: logs

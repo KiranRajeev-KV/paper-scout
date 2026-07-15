@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,20 +26,10 @@ type Downloader struct {
 	maxBytes   int64
 }
 
-func NewDownloaderWithPolicy(timeout time.Duration, policy *httpresilience.Policy) *Downloader {
-	d := NewDownloader(timeout)
-	d.policy = policy
-	return d
-}
-
 func NewDownloaderWithPolicyAndMaxBytes(timeout time.Duration, policy *httpresilience.Policy, maxBytes int64) *Downloader {
 	d := NewDownloaderWithMaxBytes(timeout, maxBytes)
 	d.policy = policy
 	return d
-}
-
-func NewDownloader(timeout time.Duration) *Downloader {
-	return NewDownloaderWithMaxBytes(timeout, defaultMaxPDFBytes)
 }
 
 func NewDownloaderWithMaxBytes(timeout time.Duration, maxBytes int64) *Downloader {
@@ -114,9 +105,12 @@ func (d *Downloader) Download(ctx context.Context, url string) (string, []byte, 
 	if int64(len(data)) > d.maxBytes {
 		return "", nil, fmt.Errorf("PDF response exceeds maximum size of %d bytes", d.maxBytes)
 	}
+	headerBytes := min(len(data), 1024)
+	if headerBytes == 0 || !bytes.Contains(data[:headerBytes], []byte("%PDF-")) {
+		return "", nil, fmt.Errorf("response does not contain a PDF signature")
+	}
 
-	logger.Debug().
-		Str("url", url).
+	logger.From(ctx).Debug().
 		Int("bytes", len(data)).
 		Dur("duration", time.Since(start)).
 		Msg("PDF downloaded")

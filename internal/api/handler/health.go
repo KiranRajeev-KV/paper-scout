@@ -2,85 +2,92 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/paper-scout/internal/storage/postgres"
-	"github.com/paper-scout/internal/storage/qdrant"
-	"github.com/paper-scout/internal/storage/redis"
+	"github.com/paper-scout/internal/logger"
 )
 
-type healthDependency interface {
+// HealthCheck is the minimal readiness contract used by the HTTP layer.
+type HealthCheck interface {
 	Ping(context.Context) error
 }
 
-type healthCheckFunc func(context.Context) error
+type healthDependency = HealthCheck
 
-func (f healthCheckFunc) Ping(ctx context.Context) error {
-	return f(ctx)
-}
+// HealthCheckFunc adapts a function to a readiness check.
+type HealthCheckFunc func(context.Context) error
 
+// Ping invokes the adapted readiness function.
+func (f HealthCheckFunc) Ping(ctx context.Context) error { return f(ctx) }
+
+type healthCheckFunc = HealthCheckFunc
+
+// HealthHandler reports liveness separately from bounded dependency readiness.
 type HealthHandler struct {
-	dependencies map[string]healthDependency
+	dependencies map[string]HealthCheck
+	timeout      time.Duration
 }
 
-func NewHealthHandler(pg *postgres.Client, redis *redis.Client, qdrant *qdrant.Client, geminiInitialized bool) *HealthHandler {
-	return &HealthHandler{
-		dependencies: map[string]healthDependency{
-			"postgres": pg,
-			"redis":    redis,
-			"qdrant":   qdrant,
-			"gemini": healthCheckFunc(func(context.Context) error {
-				if !geminiInitialized {
-					return errors.New("client is not initialized")
-				}
-				return nil
-			}),
-		},
+// NewHealthHandler constructs a readiness handler from explicitly named checks.
+func NewHealthHandler(dependencies map[string]HealthCheck) *HealthHandler {
+	copyOfDependencies := make(map[string]HealthCheck, len(dependencies))
+	for name, dependency := range dependencies {
+		copyOfDependencies[name] = dependency
 	}
+	return &HealthHandler{dependencies: copyOfDependencies, timeout: 2 * time.Second}
 }
 
+// Check runs dependency checks concurrently so one slow provider cannot consume every check's budget.
 func (h *HealthHandler) Check(c *gin.Context) {
-	services := make(map[string]string)
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-	defer cancel()
-
+	services := make(map[string]string, len(h.dependencies))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for name, dependency := range h.dependencies {
-		if dependency == nil {
-			services[name] = "error: dependency is not configured"
-			continue
-		}
-		if err := dependency.Ping(ctx); err != nil {
-			services[name] = "error: " + err.Error()
-			continue
-		}
-		services[name] = "ok"
+		name, dependency := name, dependency
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			status := "ok"
+			if dependency == nil {
+				status = "unavailable"
+			} else {
+				timeout := h.timeout
+				if timeout <= 0 {
+					timeout = 2 * time.Second
+				}
+				ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+				err := dependency.Ping(ctx)
+				cancel()
+				if err != nil {
+					status = "unavailable"
+					logger.From(c.Request.Context()).Warn().Err(err).Str("dependency", name).Msg("Readiness check failed")
+				}
+			}
+			mu.Lock()
+			services[name] = status
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 
-	allOk := true
+	allOK := true
 	for _, status := range services {
 		if status != "ok" {
-			allOk = false
+			allOK = false
 			break
 		}
 	}
-
-	status := "ok"
-	statusCode := http.StatusOK
-	if !allOk {
-		status = "degraded"
-		statusCode = http.StatusServiceUnavailable
+	if !allOK {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "services": services})
+		return
 	}
-
-	c.JSON(statusCode, gin.H{
-		"status":   status,
-		"services": services,
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "services": services})
 }
 
+// Live reports whether the HTTP process is serving requests without probing dependencies.
 func (h *HealthHandler) Live(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/paper-scout/internal/agent"
 	"github.com/paper-scout/internal/config"
@@ -29,6 +31,7 @@ type Orchestrator struct {
 	runs      sync.WaitGroup
 
 	config   *config.Config
+	logs     *logger.Manager
 	postgres *postgres.Client
 	redis    *redis.Client
 	qdrant   *qdrant.Client
@@ -49,6 +52,7 @@ type Orchestrator struct {
 	stageCompletedFn       func(context.Context, *Pipeline, Stage, interface{}) (bool, error)
 	startStageFn           func(context.Context, *Pipeline, Stage) error
 	completeStageFn        func(context.Context, *Pipeline, Stage, interface{}) error
+	failStageFn            func(context.Context, *Pipeline, Stage, error) error
 	persistTerminalStateFn func(context.Context, *Pipeline) error
 	expandFn               func(context.Context, string, string) (*agent.ExpandedQuery, error)
 	discoverFn             func(context.Context, string, string, *agent.ExpandedQuery) ([]agent.DiscoveredPaper, error)
@@ -59,6 +63,8 @@ type Orchestrator struct {
 	detectFn               func(context.Context, string, string) ([]agent.ResearchGap, error)
 	evaluateFn             func(context.Context, string, []agent.ResearchGap) ([]agent.FeasibilityResult, error)
 	generateReportFn       func(context.Context, string) (*agent.Report, error)
+	loadStateFn            func(context.Context, string) (*Pipeline, error)
+	getResearchTopicFn     func(context.Context, uuid.UUID) (*postgres.ResearchTopic, error)
 
 	sse   *SSEManager
 	state *StateManager
@@ -83,6 +89,11 @@ type Pipeline struct {
 
 type Stage string
 
+var (
+	ErrPipelineNotFound = errors.New("pipeline not found")
+	ErrInvalidTopicID   = errors.New("invalid topic ID")
+)
+
 const (
 	StagePending      Stage = "pending"
 	StageQueryExpand  Stage = "query_expansion"
@@ -99,13 +110,19 @@ const (
 func NewOrchestrator(
 	appCtx context.Context,
 	cfg *config.Config,
+	logManager *logger.Manager,
 	pg *postgres.Client,
 	redisClient *redis.Client,
 	qdrantClient *qdrant.Client,
-	llmClient *llm.Client,
+	llmClient llm.Generator,
+	embeddingProvider embedding.Embedder,
+	parser worker.DocumentParser,
 	ssClient *semantic_scholar.Client,
 	arxivClient *arxiv.Client,
-) *Orchestrator {
+) (*Orchestrator, error) {
+	if cfg == nil || logManager == nil || pg == nil || redisClient == nil || qdrantClient == nil || llmClient == nil || embeddingProvider == nil || parser == nil || ssClient == nil || arxivClient == nil {
+		return nil, fmt.Errorf("orchestrator requires all configured dependencies")
+	}
 	if appCtx == nil {
 		appCtx = context.Background()
 	}
@@ -115,17 +132,11 @@ func NewOrchestrator(
 		MaxBackoff: cfg.Pipeline.PDFResilience.MaxBackoff, FailureThreshold: cfg.Pipeline.PDFResilience.FailureThreshold,
 		OpenTimeout: cfg.Pipeline.PDFResilience.OpenTimeout,
 	}, cfg.Pipeline.PDFRateLimit.RequestsPerSecond, cfg.Pipeline.PDFRateLimit.Burst, nil), cfg.Pipeline.PDFMaxBytes)
-	parser := pdf.NewGrobidClientWithPolicyAndMaxBytes(cfg.APIs.Grobid.BaseURL, cfg.APIs.Grobid.Timeout, httpresilience.New("grobid", httpresilience.Config{
-		MaxRetries: cfg.APIs.Grobid.Resilience.MaxRetries, BaseBackoff: cfg.APIs.Grobid.Resilience.BaseBackoff,
-		MaxBackoff: cfg.APIs.Grobid.Resilience.MaxBackoff, FailureThreshold: cfg.APIs.Grobid.Resilience.FailureThreshold,
-		OpenTimeout: cfg.APIs.Grobid.Resilience.OpenTimeout,
-	}, cfg.APIs.Grobid.RateLimit.RequestsPerSecond, cfg.APIs.Grobid.RateLimit.Burst, nil), cfg.APIs.Grobid.MaxResponseBytes)
-
-	embedder := embedding.NewGenerator(llmClient, qdrantClient)
+	embedder := embedding.NewGenerator(embeddingProvider, qdrantClient)
 
 	var pool *worker.Pool
 	if cfg.Pipeline.UseRedisQueue {
-		redisQueue := redis.NewQueue(redisClient.Client(), redis.QueueOptions{
+		redisQueue := redis.NewQueue(redisClient.Client(), redisClient.WorkerClient(), redis.QueueOptions{
 			ClaimIdle: cfg.Pipeline.JobTimeout + time.Minute,
 		})
 		pool = worker.NewRedisPool(cfg.Pipeline.WorkerPoolSize, redisQueue)
@@ -139,6 +150,7 @@ func NewOrchestrator(
 		appCtx:     appCtx,
 		appCancel:  appCancel,
 		config:     cfg,
+		logs:       logManager,
 		postgres:   pg,
 		redis:      redisClient,
 		qdrant:     qdrantClient,
@@ -151,23 +163,55 @@ func NewOrchestrator(
 
 	o.queryExpander = agent.NewQueryExpander(llmClient, pg)
 	o.paperDiscoverer = agent.NewPaperDiscoverer(ssClient, arxivClient, pg, cfg.Pipeline.MaxPapers)
-	o.ranker = agent.NewRanker(pg, embedder, llmClient)
-	o.analyzer = agent.NewAnalyzer(llmClient, pg, pool)
-	o.indexer = agent.NewIndexer(pg, pool)
-	processor := worker.NewProcessor(pg, downloader, parser, embedder, o.analyzer.HandleJob, o.indexer, cfg.Pipeline.ChunkMaxWords, cfg.Pipeline.ChunkOverlap, cfg.Pipeline.EmbeddingBatchSize)
+	o.analyzer = agent.NewAnalyzer(llmClient, pg, pool, cfg.Pipeline.JobTimeout)
+	o.indexer = agent.NewIndexer(pg, pool, embedder)
+	processor, err := worker.NewProcessor(pg, downloader, parser, embedder, o.analyzer.HandleJob, o.indexer, cfg.Pipeline.ChunkMaxWords, cfg.Pipeline.ChunkOverlap, cfg.Pipeline.EmbeddingBatchSize)
+	if err != nil {
+		appCancel()
+		return nil, err
+	}
+	o.ranker = agent.NewRanker(pg, embedder, llmClient, processor)
+	cleanupResult, cleanupErr := processor.ReconcileEmbeddingCleanup(appCtx, 1000)
+	if cleanupErr != nil {
+		logger.Warn().Err(cleanupErr).Int("pending", cleanupResult.Pending).Msg("Startup embedding cleanup remains retryable")
+	} else if cleanupResult.Completed > 0 || cleanupResult.Pending > 0 {
+		logger.Info().Int("completed", cleanupResult.Completed).Int("pending", cleanupResult.Pending).Msg("Reconciled embedding cleanup at startup")
+	}
 	pool.SetHandler(processor.CreateHandler())
 	pool.SetCompletionHook(func(job worker.Job, err error, terminal bool) {
 		o.indexer.HandleJobCompletion(job, err, terminal)
 		o.analyzer.HandleJobCompletion(job, err, terminal)
 	})
-	pool.Start()
+	pool.SetContextDecorator(func(ctx context.Context, job worker.Job) context.Context {
+		return logManager.ContextForTopic(ctx, job.TopicID)
+	})
+	pool.SetJobDecorator(func(job worker.Job) worker.Job {
+		if job.RunID == "" {
+			if runID, ok := logManager.RunIDForTopic(job.TopicID); ok {
+				job.RunID = runID
+			}
+		}
+		if job.TraceID == "" {
+			job.TraceID = job.ID
+		}
+		if job.Payload == nil {
+			job.Payload = make(map[string]interface{})
+		}
+		job.Payload["run_id"] = job.RunID
+		job.Payload["trace_id"] = job.TraceID
+		return job
+	})
+	if err := pool.Start(); err != nil {
+		appCancel()
+		return nil, fmt.Errorf("start worker pool: %w", err)
+	}
 	o.gapDetector = agent.NewGapDetector(llmClient, pg, embedder, cfg.Pipeline.MaxRetrievedChunks)
 	o.feasibility = agent.NewFeasibilityEvaluator(llmClient, pg)
 	o.reportGenerator = agent.NewReportGenerator(pg)
 
 	o.recoverPipelines(appCtx)
 
-	return o
+	return o, nil
 }
 
 func (o *Orchestrator) StartResearch(ctx context.Context, topic string) (*Pipeline, error) {
@@ -189,24 +233,39 @@ func (o *Orchestrator) StartResearch(ctx context.Context, topic string) (*Pipeli
 		StartedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+	if err := o.logs.StartRun(pipeline.RunID, pipeline.TopicID); err != nil {
+		pipeline.Status = "failed"
+		pipeline.Stage = StageFailed
+		pipeline.Error = err.Error()
+		_, updateErr := o.postgres.Queries().UpdateResearchTopicState(ctx, postgres.UpdateResearchTopicStateParams{
+			ID: topicRecord.ID, Status: "failed", CurrentStage: string(StageFailed), Progress: 0,
+			ErrorMessage: pgtype.Text{String: err.Error(), Valid: true},
+		})
+		if updateErr != nil {
+			return nil, errors.Join(fmt.Errorf("create run log: %w", err), fmt.Errorf("persist run log failure: %w", updateErr))
+		}
+		return nil, fmt.Errorf("create run log: %w", err)
+	}
 
 	o.mu.Lock()
 	o.pipelines[pipeline.TopicID] = clonePipeline(pipeline)
 	o.mu.Unlock()
 
-	o.state.Save(ctx, pipeline.TopicID, pipeline)
+	if err := o.state.Save(ctx, pipeline.TopicID, pipeline); err != nil {
+		o.failPipeline(ctx, pipeline, StagePending, fmt.Errorf("persist initial live pipeline state: %w", err))
+		return nil, fmt.Errorf("start research pipeline: %w", err)
+	}
 
 	o.launchPipeline(pipeline)
 
 	return pipeline, nil
 }
 
-func (o *Orchestrator) runPipeline(p *Pipeline) {
-	o.runPipelineWithContext(o.appCtx, p)
-}
-
 func (o *Orchestrator) launchPipeline(p *Pipeline) {
 	ctx, cancel := context.WithCancel(o.appCtx)
+	if o.logs != nil {
+		ctx = o.logs.ContextForTopic(ctx, p.TopicID)
+	}
 	run := o.runPipelineWithContext
 	if o.runFn != nil {
 		run = o.runFn
@@ -223,7 +282,7 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error().Interface("panic", r).Str("topic_id", p.TopicID).Msg("Pipeline panicked")
+			logger.From(ctx).Error().Interface("panic", r).Str("topic_id", p.TopicID).Msg("Pipeline panicked")
 			o.failPipeline(ctx, p, p.Stage, fmt.Errorf("pipeline panic: %v", r))
 		}
 	}()
@@ -272,7 +331,7 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
 		}
-		if err := o.finishStage(ctx, p, StageDiscovery, map[string]int{"papers": len(papers)}); err != nil {
+		if err := o.finishStage(ctx, p, StageDiscovery, map[string]int{"total": len(papers), "succeeded": len(papers), "failed": 0}); err != nil {
 			o.failPipeline(ctx, p, StageDiscovery, err)
 			return
 		}
@@ -328,9 +387,10 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 			return
 		}
 		if err := o.analyze(ctx, p.TopicID, pending); err != nil {
-			logger.Warn().Err(err).Msg("Paper analysis had errors, continuing...")
+			o.failPipeline(ctx, p, StageAnalysis, err)
+			return
 		}
-		if err := o.finishStage(ctx, p, StageAnalysis, map[string]int{"papers": len(pending)}); err != nil {
+		if err := o.finishStage(ctx, p, StageAnalysis, map[string]int{"total": len(pending), "succeeded": len(pending), "failed": 0}); err != nil {
 			o.failPipeline(ctx, p, StageAnalysis, err)
 			return
 		}
@@ -372,9 +432,10 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 		}
 		results, evalErr := o.evaluate(ctx, p.TopicID, gaps)
 		if evalErr != nil {
-			logger.Warn().Err(evalErr).Msg("Feasibility evaluation had errors, continuing...")
+			o.failPipeline(ctx, p, StageFeasibility, evalErr)
+			return
 		}
-		if err := o.finishStage(ctx, p, StageFeasibility, results); err != nil {
+		if err := o.finishStage(ctx, p, StageFeasibility, map[string]int{"total": len(gaps), "succeeded": len(results), "failed": 0}); err != nil {
 			o.failPipeline(ctx, p, StageFeasibility, err)
 			return
 		}
@@ -403,22 +464,47 @@ func (o *Orchestrator) runPipelineWithContext(ctx context.Context, p *Pipeline) 
 		}
 	}
 
-	o.updateStatus(p, StageCompleted, 1.0, "")
-
+	o.setStatus(p, StageCompleted, 1.0, "")
 	if err := o.persistTerminal(ctx, p); err != nil {
-		logger.Warn().Err(err).Str("topic_id", p.TopicID).Msg("Failed to persist completed topic state")
+		o.failPipeline(ctx, p, StageReport, fmt.Errorf("persist completed pipeline state: %w", err))
+		return
 	}
+	o.publishStatus(p)
 
-	logger.Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
+	logger.From(ctx).Info().Str("topic_id", p.TopicID).Msg("Pipeline completed")
+	if o.logs != nil {
+		if err := o.logs.CloseRun(p.RunID); err != nil {
+			logger.Error().Err(err).Str("run_id", p.RunID).Msg("Failed to close run log")
+		}
+	}
 }
 
 func (o *Orchestrator) failPipeline(ctx context.Context, p *Pipeline, stage Stage, err error) {
-	o.updateStatus(p, StageFailed, 0, err.Error())
+	if errors.Is(err, context.Canceled) && o.appCtx.Err() != nil {
+		logger.From(ctx).Info().Str("stage", string(stage)).Msg("Pipeline suspended for server shutdown")
+		o.publishStatus(p)
+		return
+	}
+	o.setStatus(p, StageFailed, 0, err.Error())
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if dbErr := o.failStage(persistCtx, p, stage, err); dbErr != nil {
-		logger.Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic state")
+	if dbErr := o.persistFailedStage(persistCtx, p, stage, err); dbErr != nil {
+		logger.From(ctx).Warn().Err(dbErr).Str("topic_id", p.TopicID).Msg("Failed to persist failed topic state")
 	}
+	o.publishStatus(p)
+	logger.From(ctx).Error().Err(err).Str("stage", string(stage)).Msg("Pipeline failed")
+	if o.logs != nil {
+		if closeErr := o.logs.CloseRun(p.RunID); closeErr != nil {
+			logger.Error().Err(closeErr).Str("run_id", p.RunID).Msg("Failed to close run log")
+		}
+	}
+}
+
+func (o *Orchestrator) persistFailedStage(ctx context.Context, p *Pipeline, stage Stage, stageErr error) error {
+	if o.failStageFn != nil {
+		return o.failStageFn(ctx, p, stage, stageErr)
+	}
+	return o.failStage(ctx, p, stage, stageErr)
 }
 
 func (o *Orchestrator) isStageCompleted(ctx context.Context, p *Pipeline, stage Stage, output interface{}) (bool, error) {
@@ -513,7 +599,11 @@ func (o *Orchestrator) generateReport(ctx context.Context, topicID string) (*age
 }
 
 func (o *Orchestrator) pendingRankedPapers(ctx context.Context, topicID string, ranked []agent.RankedPaper) ([]agent.RankedPaper, error) {
-	completed, err := o.postgres.Queries().GetCompletedPaperIDsByTopic(ctx, parseUUID(topicID))
+	id, err := uuid.Parse(topicID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid topic ID %q: %w", topicID, err)
+	}
+	completed, err := o.postgres.Queries().GetCompletedPaperIDsByTopic(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("load completed paper analyses: %w", err)
 	}
@@ -533,7 +623,7 @@ func (o *Orchestrator) pendingRankedPapers(ctx context.Context, topicID string, 
 func (o *Orchestrator) analyzePapers(ctx context.Context, topicID string, papers []agent.RankedPaper) error {
 	maxAnalyze := o.config.Pipeline.PapersToAnalyze
 	if maxAnalyze > 0 && len(papers) > maxAnalyze {
-		logger.Info().
+		logger.From(ctx).Info().
 			Int("discovered", len(papers)).
 			Int("analyzing", maxAnalyze).
 			Msg("Limiting papers to analyze")
@@ -565,11 +655,11 @@ func (o *Orchestrator) analyzePapers(ctx context.Context, topicID string, papers
 		progress := 0.35 + (float64(completed)/float64(total))*0.30
 		o.sse.Broadcast(progressEvent{TopicID: topicID, Stage: "paper_analysis", Progress: progress})
 
-		logger.Info().
+		logger.From(ctx).Info().
 			Str("topic_id", topicID).
 			Int("completed", completed).
 			Int("total", total).
-			Float64("progress", float64(completed)/float64(total)*100).
+			Float64("progress", float64(completed*100)/float64(total)).
 			Msg("Paper analysis progress updated")
 	})
 }
@@ -590,7 +680,7 @@ func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic str
 		queries := expanded.GetQueriesForLevel(level, topic)
 		keywords := expanded.GetKeywordsForLevel(level)
 
-		logger.Info().
+		logger.From(ctx).Info().
 			Str("topic_id", topicID).
 			Int("attempt", attempt+1).
 			Int("level", int(level)).
@@ -600,14 +690,14 @@ func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic str
 
 		if attempt > 0 {
 			if err := o.paperDiscoverer.ClearPapers(ctx, topicID); err != nil {
-				logger.Warn().Err(err).Msg("Failed to clear papers before retry")
+				return nil, fmt.Errorf("clear papers before discovery retry %d: %w", attempt+1, err)
 			}
 		}
 
 		papers, err := o.paperDiscoverer.Discover(ctx, topicID, queries, keywords)
 		if err != nil {
 			lastErr = err
-			logger.Warn().
+			logger.From(ctx).Warn().
 				Err(err).
 				Int("attempt", attempt+1).
 				Msg("Discovery attempt failed")
@@ -617,14 +707,14 @@ func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic str
 		allPapers = papers
 
 		if len(papers) >= o.config.Pipeline.MinPapersForAnalysis {
-			logger.Info().
+			logger.From(ctx).Info().
 				Int("attempt", attempt+1).
 				Int("papers_found", len(papers)).
 				Msg("Discovery succeeded")
 			return papers, nil
 		}
 
-		logger.Warn().
+		logger.From(ctx).Warn().
 			Int("attempt", attempt+1).
 			Int("papers_found", len(papers)).
 			Int("min_required", o.config.Pipeline.MinPapersForAnalysis).
@@ -643,6 +733,11 @@ func (o *Orchestrator) discoverWithRetry(ctx context.Context, topicID, topic str
 }
 
 func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, errMsg string) {
+	o.setStatus(p, stage, progress, errMsg)
+	o.publishStatus(p)
+}
+
+func (o *Orchestrator) setStatus(p *Pipeline, stage Stage, progress float64, errMsg string) {
 	p.Stage = stage
 	p.Progress = progress
 	p.UpdatedAt = time.Now()
@@ -656,30 +751,44 @@ func (o *Orchestrator) updateStatus(p *Pipeline, stage Stage, progress float64, 
 		p.Status = "processing"
 	}
 
-	o.publishPipeline(p)
+	if errMsg == "" {
+		p.Error = ""
+	}
+}
 
+func (o *Orchestrator) publishStatus(p *Pipeline) {
+	ctx := o.appCtx
+	if o.logs != nil {
+		ctx = o.logs.ContextForTopic(ctx, p.TopicID)
+	}
+	o.publishPipeline(p)
 	if o.state != nil {
-		_ = o.state.Save(o.appCtx, p.TopicID, p)
+		// A pipeline is intentionally canceled during shutdown, but Redis still
+		// needs one last transient snapshot. Detach only cancellation (retaining
+		// logger values) and bound the write so shutdown remains finite.
+		stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = o.state.Save(stateCtx, p.TopicID, p)
 	}
 
 	if o.sse != nil {
 		o.sse.Broadcast(statusEvent{
 			TopicID:  p.TopicID,
 			Status:   p.Status,
-			Stage:    string(stage),
-			Progress: progress,
-			Error:    errMsg,
+			Stage:    string(p.Stage),
+			Progress: p.Progress,
+			Error:    p.Error,
 		})
 	}
 
-	logger.Debug().
+	logger.From(ctx).Debug().
 		Str("topic_id", p.TopicID).
-		Str("stage", string(stage)).
-		Float64("progress", progress).
+		Str("stage", string(p.Stage)).
+		Float64("progress", p.Progress).
 		Msg("Pipeline status updated")
 }
 
-func (o *Orchestrator) GetPipeline(topicID string) (*Pipeline, error) {
+func (o *Orchestrator) GetPipeline(ctx context.Context, topicID string) (*Pipeline, error) {
 	o.mu.RLock()
 	p, exists := o.pipelines[topicID]
 	if exists {
@@ -691,7 +800,63 @@ func (o *Orchestrator) GetPipeline(topicID string) (*Pipeline, error) {
 		return p, nil
 	}
 
-	return o.state.Load(o.appCtx, topicID)
+	id, err := uuid.Parse(topicID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidTopicID, topicID)
+	}
+
+	loadState := o.loadStateFn
+	if loadState == nil && o.state != nil {
+		loadState = o.state.Load
+	}
+	if loadState != nil {
+		pipeline, stateErr := loadState(ctx, topicID)
+		if stateErr == nil {
+			o.publishPipeline(pipeline)
+			return clonePipeline(pipeline), nil
+		}
+		if !errors.Is(stateErr, ErrStateNotFound) {
+			logger.Warn().Err(stateErr).Str("topic_id", topicID).Msg("Failed to load Redis pipeline state; falling back to Postgres")
+		}
+	}
+
+	getTopic := o.getResearchTopicFn
+	if getTopic == nil && o.postgres != nil {
+		getTopic = o.postgres.Queries().GetResearchTopic
+	}
+	if getTopic == nil {
+		return nil, fmt.Errorf("load durable pipeline %s: postgres is not configured", topicID)
+	}
+	topic, err := getTopic(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", ErrPipelineNotFound, topicID)
+		}
+		return nil, fmt.Errorf("load durable pipeline %s: %w", topicID, err)
+	}
+	pipeline := pipelineFromTopic(topic)
+	o.publishPipeline(pipeline)
+	return clonePipeline(pipeline), nil
+}
+
+func pipelineFromTopic(topic *postgres.ResearchTopic) *Pipeline {
+	pipeline := &Pipeline{
+		TopicID:   topic.ID.String(),
+		RunID:     topic.RunID.String(),
+		Topic:     topic.Topic,
+		Status:    topic.Status,
+		Stage:     Stage(topic.CurrentStage),
+		Progress:  topic.Progress,
+		StartedAt: topic.CreatedAt.Time,
+		UpdatedAt: topic.UpdatedAt.Time,
+	}
+	if pipeline.Stage == "" {
+		pipeline.Stage = StagePending
+	}
+	if topic.ErrorMessage.Valid {
+		pipeline.Error = topic.ErrorMessage.String
+	}
+	return pipeline
 }
 
 func clonePipeline(p *Pipeline) *Pipeline {
@@ -816,7 +981,12 @@ func (o *Orchestrator) recoverPipelines(ctx context.Context) {
 
 	for _, pipeline := range recoverable {
 		if pipeline.RunID == "" {
-			topic, err := o.postgres.Queries().GetResearchTopic(ctx, parseUUID(pipeline.TopicID))
+			topicID, parseErr := uuid.Parse(pipeline.TopicID)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("topic_id", pipeline.TopicID).Msg("Invalid topic ID during recovery")
+				continue
+			}
+			topic, err := o.postgres.Queries().GetResearchTopic(ctx, topicID)
 			if err != nil {
 				logger.Warn().Err(err).Str("topic_id", pipeline.TopicID).Msg("Failed to resolve run ID during recovery")
 				continue
@@ -830,6 +1000,26 @@ func (o *Orchestrator) recoverPipelines(ctx context.Context) {
 		}
 		o.pipelines[pipeline.TopicID] = clonePipeline(pipeline)
 		o.mu.Unlock()
+		if err := o.logs.StartRun(pipeline.RunID, pipeline.TopicID); err != nil {
+			logger.Error().Err(err).Str("topic_id", pipeline.TopicID).Msg("Failed to reopen run log; recovery skipped")
+			pipeline.Status, pipeline.Stage, pipeline.Error = "failed", StageFailed, err.Error()
+			topicID, parseErr := uuid.Parse(pipeline.TopicID)
+			if parseErr != nil {
+				logger.Error().Err(parseErr).Str("topic_id", pipeline.TopicID).Msg("Cannot persist failed recovery state")
+				continue
+			}
+			if _, updateErr := o.postgres.Queries().UpdateResearchTopicState(ctx, postgres.UpdateResearchTopicStateParams{
+				ID: topicID, Status: "failed", CurrentStage: string(StageFailed), Progress: pipeline.Progress,
+				ErrorMessage: pgtype.Text{String: pipeline.Error, Valid: true},
+			}); updateErr != nil {
+				logger.Error().Err(updateErr).Str("topic_id", pipeline.TopicID).Msg("Failed to persist recovery log failure")
+			}
+			o.publishPipeline(pipeline)
+			if saveErr := o.state.Save(ctx, pipeline.TopicID, pipeline); saveErr != nil {
+				logger.Error().Err(saveErr).Str("topic_id", pipeline.TopicID).Msg("Failed to publish recovery log failure")
+			}
+			continue
+		}
 
 		logger.Info().
 			Str("topic_id", pipeline.TopicID).
@@ -853,16 +1043,4 @@ type progressEvent struct {
 	TopicID  string  `json:"topic_id"`
 	Stage    string  `json:"stage"`
 	Progress float64 `json:"progress"`
-}
-
-func parseUUID(s string) uuid.UUID {
-	id, _ := uuid.Parse(s)
-	return id
-}
-
-func pgDate(t time.Time) pgtype.Date {
-	return pgtype.Date{
-		Time:  t,
-		Valid: true,
-	}
 }

@@ -11,22 +11,27 @@ import (
 )
 
 type Querier interface {
-	AddCitation(ctx context.Context, arg AddCitationParams) error
+	ActivateEmbeddingGeneration(ctx context.Context, id uuid.UUID) (*EmbeddingGeneration, error)
 	AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) error
+	CompleteEmbeddingCleanupTask(ctx context.Context, id uuid.UUID) (*EmbeddingCleanupTask, error)
+	CompletePaperChunkEmbedding(ctx context.Context, arg CompletePaperChunkEmbeddingParams) (*PaperChunk, error)
 	CompletePipelineStage(ctx context.Context, arg CompletePipelineStageParams) (*PipelineStageCheckpoint, error)
 	CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error)
+	CreateEmbeddingCleanupTask(ctx context.Context, arg CreateEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error)
+	CreateEmbeddingGeneration(ctx context.Context, arg CreateEmbeddingGenerationParams) (*EmbeddingGeneration, error)
 	CreateNovelDirection(ctx context.Context, arg CreateNovelDirectionParams) (*NovelDirection, error)
 	CreatePaper(ctx context.Context, arg CreatePaperParams) (uuid.UUID, error)
-	CreatePipelineRun(ctx context.Context, arg CreatePipelineRunParams) (*PipelineRun, error)
 	CreateResearchGap(ctx context.Context, arg CreateResearchGapParams) (*ResearchGap, error)
 	CreateResearchTopic(ctx context.Context, arg CreateResearchTopicParams) (*ResearchTopic, error)
 	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
 	DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePaperChunksParams) ([]*PaperChunk, error)
+	FailEmbeddingCleanupTask(ctx context.Context, arg FailEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error)
 	FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error)
+	GetActiveEmbeddingGeneration(ctx context.Context) (*EmbeddingGeneration, error)
 	GetCompletedPaperChunks(ctx context.Context, arg GetCompletedPaperChunksParams) ([]*PaperChunk, error)
 	GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error)
-	GetLatestPipelineRun(ctx context.Context, topicID uuid.UUID) (*PipelineRun, error)
+	GetEmbeddingGenerationByIdentity(ctx context.Context, arg GetEmbeddingGenerationByIdentityParams) (*EmbeddingGeneration, error)
 	GetNextPaperAuthorPosition(ctx context.Context, paperID uuid.UUID) (int32, error)
 	GetNovelDirection(ctx context.Context, id uuid.UUID) (*NovelDirection, error)
 	GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UUID) ([]*NovelDirection, error)
@@ -34,33 +39,36 @@ type Querier interface {
 	GetPaperAuthors(ctx context.Context, paperID uuid.UUID) ([]*Author, error)
 	GetPaperByExternalID(ctx context.Context, arg GetPaperByExternalIDParams) (*Paper, error)
 	GetPaperChunks(ctx context.Context, arg GetPaperChunksParams) ([]*PaperChunk, error)
-	GetPaperCitations(ctx context.Context, citingPaperID uuid.UUID) ([]*Paper, error)
-	GetPaperCitedBy(ctx context.Context, citedPaperID uuid.UUID) ([]*Paper, error)
+	GetPaperDocument(ctx context.Context, paperID uuid.UUID) (*PaperDocument, error)
 	GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*Paper, error)
 	GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error)
-	GetPipelineRun(ctx context.Context, id uuid.UUID) (*PipelineRun, error)
-	GetPipelineRunsByTopic(ctx context.Context, topicID uuid.UUID) ([]*PipelineRun, error)
 	GetPipelineStage(ctx context.Context, arg GetPipelineStageParams) (*PipelineStageCheckpoint, error)
 	GetPipelineStages(ctx context.Context, runID uuid.UUID) ([]*PipelineStageCheckpoint, error)
 	GetResearchGap(ctx context.Context, id uuid.UUID) (*ResearchGap, error)
 	GetResearchGapsByTopic(ctx context.Context, topicID uuid.UUID) ([]*ResearchGap, error)
 	GetResearchTopic(ctx context.Context, id uuid.UUID) (*ResearchTopic, error)
 	GetResearchTopicByStatus(ctx context.Context, status string) ([]*ResearchTopic, error)
+	ListPaperChunksForReindex(ctx context.Context) ([]*PaperChunk, error)
+	ListPendingEmbeddingCleanupTasks(ctx context.Context, limit int32) ([]*EmbeddingCleanupTask, error)
 	ListRecoverableResearchTopics(ctx context.Context) ([]*ResearchTopic, error)
 	ListResearchTopics(ctx context.Context, arg ListResearchTopicsParams) ([]*ResearchTopic, error)
+	LockPaperChunksForEmbeddingActivation(ctx context.Context) error
+	MarkPaperChunkEmbeddingIndexing(ctx context.Context, arg MarkPaperChunkEmbeddingIndexingParams) (*PaperChunk, error)
+	MarkPaperChunkForActiveGeneration(ctx context.Context, arg MarkPaperChunkForActiveGenerationParams) (*PaperChunk, error)
+	RetireActiveEmbeddingGenerations(ctx context.Context, id uuid.UUID) error
 	StartPipelineStage(ctx context.Context, arg StartPipelineStageParams) (*PipelineStageCheckpoint, error)
+	UpdateEmbeddingGenerationProgress(ctx context.Context, arg UpdateEmbeddingGenerationProgressParams) (*EmbeddingGeneration, error)
 	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error
 	UpdatePaperChunkEmbeddingStatus(ctx context.Context, arg UpdatePaperChunkEmbeddingStatusParams) (*PaperChunk, error)
-	UpdatePaperEmbeddingStatus(ctx context.Context, arg UpdatePaperEmbeddingStatusParams) (*Paper, error)
 	UpdatePaperPDFStatus(ctx context.Context, arg UpdatePaperPDFStatusParams) (*Paper, error)
 	UpdatePaperRelevanceScore(ctx context.Context, arg UpdatePaperRelevanceScoreParams) error
-	UpdatePipelineRunStatus(ctx context.Context, arg UpdatePipelineRunStatusParams) (*PipelineRun, error)
 	UpdateResearchTopicExpandedQueries(ctx context.Context, arg UpdateResearchTopicExpandedQueriesParams) (*ResearchTopic, error)
 	UpdateResearchTopicState(ctx context.Context, arg UpdateResearchTopicStateParams) (*ResearchTopic, error)
 	UpdateResearchTopicStatus(ctx context.Context, arg UpdateResearchTopicStatusParams) (*ResearchTopic, error)
 	UpsertAuthorByName(ctx context.Context, name string) (*Author, error)
 	UpsertAuthorBySemanticScholarID(ctx context.Context, arg UpsertAuthorBySemanticScholarIDParams) (*Author, error)
 	UpsertPaperChunk(ctx context.Context, arg UpsertPaperChunkParams) (*PaperChunk, error)
+	UpsertPaperDocument(ctx context.Context, arg UpsertPaperDocumentParams) (*PaperDocument, error)
 }
 
 var _ Querier = (*Queries)(nil)

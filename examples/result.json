@@ -1,0 +1,46 @@
+{
+  "topic_id": "e1723871-e8fa-4bb5-9435-39bc6849f19a",
+  "run_id": "b8195924-749d-4888-9774-28136e3f1f57",
+  "topic": "Robust evaluation and mitigation of hallucinations in multimodal retrieval-augmented generation across domains",
+  "status": "completed",
+  "stage": "completed",
+  "progress": 1,
+  "generated_at": "2026-07-15T23:11:59+05:30",
+  "papers": [
+    {
+      "id": "c6f362a1-59ed-4c80-85eb-6b539f6afb03",
+      "title": "Mitigating Visual Hallucinations in Multimodal Systems through Retrieval-Augmented Reliability-Aware Inference",
+      "authors": ["Pratheswaran Hariharan", "Haiping Xu", "Donghui Yan"],
+      "year": 2026,
+      "abstract": "A retrieval-augmented reliability-aware inference framework uses external visual evidence, similarity strength, class-support agreement, evidence margin, and entropy-based uncertainty to decide whether to answer, answer cautiously, or abstain."
+    },
+    {
+      "id": "39dde7af-46f3-47c3-af8b-56e67267dfa7",
+      "title": "Ragas: Automated Evaluation of Retrieval Augmented Generation",
+      "authors": ["Shahul Es", "Jithin James", "Luis Espinosa-Anke", "Steven Schockaert"],
+      "year": 2023,
+      "abstract": "Ragas provides a reference-free suite of metrics for retrieval, context, and generation quality in retrieval-augmented generation pipelines."
+    }
+  ],
+  "research_gaps": [
+    {
+      "gap_type": "unexplored",
+      "title": "Generalization of reliability indicators across visual domains",
+      "description": "Reliability signals derived from a single visual benchmark may not transfer to medical, geospatial, or culturally specific visual domains.",
+      "evidence": ["c6f362a1-59ed-4c80-85eb-6b539f6afb03"]
+    }
+  ],
+  "novel_directions": [
+    {
+      "title": "Cross-domain reliability benchmark for multimodal RAG",
+      "description": "Evaluate calibrated abstention and reliability indicators across multiple visual domains with common retrieval corpora and fixed base models.",
+      "feasibility": {
+        "difficulty": "medium",
+        "estimated_cost": "Moderate compute and curation effort for multiple visual domains.",
+        "industry_viability": "Applicable to AI safety, healthcare, and content-moderation systems.",
+        "time_to_mvp": "6-9 months"
+      }
+    }
+  ],
+  "bibtex_file": "references.bib"
+}

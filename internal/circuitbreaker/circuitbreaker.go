@@ -8,7 +8,8 @@ import (
 )
 
 var (
-	ErrCircuitOpen = errors.New("circuit breaker is open")
+	ErrCircuitOpen  = errors.New("circuit breaker is open")
+	ErrHalfOpenBusy = errors.New("circuit breaker half-open probe is already running")
 )
 
 type State int
@@ -46,6 +47,7 @@ type CircuitBreaker struct {
 	failures        int
 	successes       int
 	lastFailureTime time.Time
+	probeInFlight   bool
 	mu              sync.RWMutex
 }
 
@@ -90,11 +92,16 @@ func (cb *CircuitBreaker) beforeRequest() error {
 	case StateOpen:
 		if time.Since(cb.lastFailureTime) > cb.config.OpenTimeout {
 			cb.setState(StateHalfOpen)
+			cb.probeInFlight = true
 			return nil
 		}
 		return ErrCircuitOpen
 
 	case StateHalfOpen:
+		if cb.probeInFlight {
+			return ErrHalfOpenBusy
+		}
+		cb.probeInFlight = true
 		return nil
 	}
 
@@ -104,6 +111,7 @@ func (cb *CircuitBreaker) beforeRequest() error {
 func (cb *CircuitBreaker) afterRequest(err error) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	cb.probeInFlight = false
 
 	if err == nil {
 		cb.onSuccess()
@@ -152,9 +160,12 @@ func (cb *CircuitBreaker) setState(newState State) {
 		cb.failures = 0
 		cb.successes = 0
 	}
+	if newState == StateOpen {
+		cb.probeInFlight = false
+	}
 
 	if cb.config.OnStateChange != nil {
-		go cb.config.OnStateChange(cb.name, oldState, newState)
+		cb.config.OnStateChange(cb.name, oldState, newState)
 	}
 }
 
@@ -176,4 +187,5 @@ func (cb *CircuitBreaker) Reset() {
 	cb.state = StateClosed
 	cb.failures = 0
 	cb.successes = 0
+	cb.probeInFlight = false
 }

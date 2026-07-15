@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
@@ -19,9 +18,10 @@ type GapDetector struct {
 	embedder   *embedding.Generator
 	maxChunks  int
 	retrieveFn func(context.Context, string, string) []retrievedChunk
+	storeGapFn func(context.Context, string, ResearchGap) error
 }
 
-func NewGapDetector(llmClient *llm.Client, pg *postgres.Client, embedder *embedding.Generator, maxChunks int) *GapDetector {
+func NewGapDetector(llmClient llm.Generator, pg *postgres.Client, embedder *embedding.Generator, maxChunks int) *GapDetector {
 	if maxChunks <= 0 {
 		maxChunks = 12
 	}
@@ -54,11 +54,15 @@ type gapDetectionItem struct {
 }
 
 func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]ResearchGap, error) {
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("topic_id", topicID).
 		Msg("Starting gap detection")
 
-	papers, err := g.postgres.Queries().GetPapersByTopicForAnalysis(ctx, pgUUID(topicID))
+	topicUUID, err := parseID("topic ID", topicID)
+	if err != nil {
+		return nil, err
+	}
+	papers, err := g.postgres.Queries().GetPapersByTopicForAnalysis(ctx, topicUUID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get analyzed papers: %w", err)
 	}
@@ -67,9 +71,12 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 		return nil, fmt.Errorf("no analyzed papers available for gap detection")
 	}
 
-	logger.Info().Int("papers", len(papers)).Msg("Papers available for gap detection")
+	logger.From(ctx).Info().Int("papers", len(papers)).Msg("Papers available for gap detection")
 
-	retrieved := g.retrieve(ctx, topicID, topic)
+	retrieved, err := g.retrieve(ctx, topicID, topic)
+	if err != nil {
+		return nil, err
+	}
 	prompt := buildGapPrompt(topic, papers, retrieved)
 
 	var response gapDetectionResponse
@@ -93,22 +100,35 @@ func (g *GapDetector) Detect(ctx context.Context, topicID, topic string) ([]Rese
 		return nil, fmt.Errorf("no valid gaps found in response")
 	}
 
-	for i := range gaps {
-		if err := g.storeGap(ctx, topicID, gaps[i]); err != nil {
-			logger.Warn().Err(err).Str("gap", gaps[i].Title).Msg("Failed to store gap")
-		}
+	if err := g.persistGaps(ctx, topicID, gaps); err != nil {
+		return nil, err
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Int("gaps", len(gaps)).
 		Msg("Gap detection complete")
 
 	return gaps, nil
 }
 
-func (g *GapDetector) retrieve(ctx context.Context, topicID, topic string) []retrievedChunk {
+func (g *GapDetector) persistGaps(ctx context.Context, topicID string, gaps []ResearchGap) error {
+	failures := make([]ItemFailure, 0)
+	for i := range gaps {
+		storeGap := g.storeGap
+		if g.storeGapFn != nil {
+			storeGap = g.storeGapFn
+		}
+		if err := storeGap(ctx, topicID, gaps[i]); err != nil {
+			logger.From(ctx).Warn().Err(err).Str("gap", gaps[i].Title).Msg("Failed to store gap")
+			failures = append(failures, ItemFailure{Kind: "research_gap", Identifier: gaps[i].Title, Err: err})
+		}
+	}
+	return newBatchError("research gap persistence", len(gaps), failures)
+}
+
+func (g *GapDetector) retrieve(ctx context.Context, topicID, topic string) ([]retrievedChunk, error) {
 	if g.retrieveFn != nil {
-		return g.retrieveFn(ctx, topicID, topic)
+		return g.retrieveFn(ctx, topicID, topic), nil
 	}
 	return g.retrieveChunks(ctx, topicID, topic)
 }
@@ -119,19 +139,17 @@ type retrievedChunk struct {
 	Score   float32
 }
 
-func (g *GapDetector) retrieveChunks(ctx context.Context, topicID, topic string) []retrievedChunk {
+func (g *GapDetector) retrieveChunks(ctx context.Context, topicID, topic string) ([]retrievedChunk, error) {
 	if g.embedder == nil {
-		return nil
+		return nil, fmt.Errorf("retrieve gap evidence: embedding provider is not configured")
 	}
 	vector, err := g.embedder.Generate(ctx, topic)
 	if err != nil {
-		logger.Warn().Err(err).Str("topic_id", topicID).Msg("Chunk retrieval embedding failed; using paper summaries")
-		return nil
+		return nil, fmt.Errorf("embed gap evidence query for topic %s: %w", topicID, err)
 	}
 	results, err := g.embedder.SearchChunks(ctx, vector, uint64(g.maxChunks), topicID)
 	if err != nil {
-		logger.Warn().Err(err).Str("topic_id", topicID).Msg("Chunk retrieval failed; using paper summaries")
-		return nil
+		return nil, fmt.Errorf("retrieve gap evidence for topic %s: %w", topicID, err)
 	}
 	chunks := make([]retrievedChunk, 0, len(results))
 	for _, result := range results {
@@ -140,7 +158,7 @@ func (g *GapDetector) retrieveChunks(ctx context.Context, topicID, topic string)
 		}
 		chunks = append(chunks, retrievedChunk{PaperID: result.PaperID, Text: result.Text, Score: result.Score})
 	}
-	return chunks
+	return chunks, nil
 }
 
 func buildGapPrompt(topic string, papers []*postgres.GetPapersByTopicForAnalysisRow, retrieved ...[]retrievedChunk) string {
@@ -187,8 +205,8 @@ Return JSON only with this shape:
   "gaps": [
     {
       "gap_type": "unexplored|conflicting|limitation",
-      "title": "max 60 chars",
-      "description": "max 100 chars",
+	  "title": "string",
+	  "description": "string",
       "evidence_indices": [1, 3],
       "related_paper_indices": [1, 3]
     }
@@ -198,12 +216,20 @@ Use only 1-based paper indices from the list. Do not generate or reconstruct UUI
 }
 
 func (g *GapDetector) storeGap(ctx context.Context, topicID string, gap ResearchGap) error {
-	_, err := g.postgres.Queries().CreateResearchGap(ctx, postgres.CreateResearchGapParams{
-		TopicID:         pgUUID(topicID),
+	topicUUID, err := parseID("topic ID", topicID)
+	if err != nil {
+		return err
+	}
+	relatedPaperIDs, err := parseIDs("related paper ID", gap.RelatedPapers)
+	if err != nil {
+		return err
+	}
+	_, err = g.postgres.Queries().CreateResearchGap(ctx, postgres.CreateResearchGapParams{
+		TopicID:         topicUUID,
 		GapType:         gap.GapType,
 		Title:           gap.Title,
 		Description:     pgText(gap.Description),
-		RelatedPaperIds: pgUUIDsFromStrings(gap.RelatedPapers),
+		RelatedPaperIds: relatedPaperIDs,
 		Evidence:        pgText(gap.Evidence),
 	})
 
@@ -228,8 +254,8 @@ func resolveGapReferences(items []gapDetectionItem, papers []*postgres.GetPapers
 
 		gaps = append(gaps, ResearchGap{
 			GapType:       item.GapType,
-			Title:         truncateText(item.Title, 60),
-			Description:   truncateText(item.Description, 100),
+			Title:         item.Title,
+			Description:   item.Description,
 			Evidence:      strings.Join(evidenceIDs, ","),
 			RelatedPapers: relatedIDs,
 		})
@@ -247,14 +273,8 @@ func validateGapItem(item gapDetectionItem, itemIndex int) error {
 	if strings.TrimSpace(item.Title) == "" {
 		return fmt.Errorf("%s is missing title", prefix)
 	}
-	if utf8.RuneCountInString(item.Title) > 60 {
-		return fmt.Errorf("%s title exceeds 60 characters", prefix)
-	}
 	if strings.TrimSpace(item.Description) == "" {
 		return fmt.Errorf("%s is missing description", prefix)
-	}
-	if utf8.RuneCountInString(item.Description) > 100 {
-		return fmt.Errorf("%s description exceeds 100 characters", prefix)
 	}
 	if len(item.EvidenceIndices) == 0 {
 		return fmt.Errorf("%s is missing evidence_indices", prefix)

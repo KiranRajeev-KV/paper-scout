@@ -8,6 +8,40 @@ type Chunk struct {
 	Text      string
 	Index     int
 	WordCount int
+	Heading   string
+}
+
+// ChunkMarkdown preserves the nearest Markdown heading as chunk provenance.
+func ChunkMarkdown(markdown string, maxWords, overlap int) []Chunk {
+	type section struct {
+		heading string
+		lines   []string
+	}
+	sections := []section{{}}
+	for _, line := range strings.Split(markdown, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			heading := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			if heading != "" {
+				sections = append(sections, section{heading: heading})
+				continue
+			}
+		}
+		sections[len(sections)-1].lines = append(sections[len(sections)-1].lines, line)
+	}
+	var result []Chunk
+	for _, section := range sections {
+		body := strings.TrimSpace(strings.Join(section.lines, "\n"))
+		if body == "" {
+			continue
+		}
+		for _, chunk := range ChunkByParagraphsWithOverlap(body, maxWords, overlap) {
+			chunk.Index = len(result)
+			chunk.Heading = section.heading
+			result = append(result, chunk)
+		}
+	}
+	return result
 }
 
 func ChunkText(text string, maxWords int, overlap int) []Chunk {
@@ -49,10 +83,6 @@ func ChunkText(text string, maxWords int, overlap int) []Chunk {
 	}
 
 	return chunks
-}
-
-func ChunkByParagraphs(text string, maxWords int) []Chunk {
-	return ChunkByParagraphsWithOverlap(text, maxWords, 0)
 }
 
 // ChunkByParagraphsWithOverlap preserves paragraph boundaries whenever possible

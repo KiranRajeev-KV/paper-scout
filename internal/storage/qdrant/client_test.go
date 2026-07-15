@@ -6,7 +6,9 @@ import (
 	qdrantapi "github.com/qdrant/go-client/qdrant"
 )
 
+// Protects validate collection schema.
 func TestValidateCollectionSchema(t *testing.T) {
+	const dimensions = 4096
 	tests := []struct {
 		name string
 		info *qdrantapi.CollectionInfo
@@ -15,7 +17,7 @@ func TestValidateCollectionSchema(t *testing.T) {
 		{
 			name: "compatible",
 			info: collectionInfo(qdrantapi.NewVectorsConfig(&qdrantapi.VectorParams{
-				Size: VectorSize, Distance: qdrantapi.Distance_Cosine,
+				Size: dimensions, Distance: qdrantapi.Distance_Cosine,
 			})),
 			want: true,
 		},
@@ -28,13 +30,13 @@ func TestValidateCollectionSchema(t *testing.T) {
 		{
 			name: "wrong distance",
 			info: collectionInfo(qdrantapi.NewVectorsConfig(&qdrantapi.VectorParams{
-				Size: VectorSize, Distance: qdrantapi.Distance_Euclid,
+				Size: dimensions, Distance: qdrantapi.Distance_Euclid,
 			})),
 		},
 		{
 			name: "named vectors",
 			info: collectionInfo(qdrantapi.NewVectorsConfigMap(map[string]*qdrantapi.VectorParams{
-				"default": {Size: VectorSize, Distance: qdrantapi.Distance_Cosine},
+				"default": {Size: dimensions, Distance: qdrantapi.Distance_Cosine},
 			})),
 		},
 		{
@@ -45,7 +47,7 @@ func TestValidateCollectionSchema(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCollectionSchema("papers", tt.info)
+			err := validateCollectionSchema("papers", tt.info, dimensions)
 			if (err == nil) != tt.want {
 				t.Fatalf("validateCollectionSchema error = %v, want success = %v", err, tt.want)
 			}
@@ -58,5 +60,45 @@ func collectionInfo(vectors *qdrantapi.VectorsConfig) *qdrantapi.CollectionInfo 
 		Config: &qdrantapi.CollectionConfig{
 			Params: &qdrantapi.CollectionParams{VectorsConfig: vectors},
 		},
+	}
+}
+
+// Protects mutation requests wait for application.
+func TestMutationRequestsWaitForApplication(t *testing.T) {
+	upsert := upsertRequest("papers", []*qdrantapi.PointStruct{})
+	deleted := deleteIDsRequest("papers", []*qdrantapi.PointId{})
+	if !upsert.GetWait() || !deleted.GetWait() {
+		t.Fatalf("mutation wait flags = %v/%v, want true/true", upsert.GetWait(), deleted.GetWait())
+	}
+}
+
+// Protects vector queries return the payload fields consumed by ranking and chunk retrieval.
+func TestQueryRequestIncludesRequiredPayload(t *testing.T) {
+	request := queryRequest("papers", []float32{0.1, 0.2}, 20, nil)
+	include := request.GetWithPayload().GetInclude().GetFields()
+	want := []string{"paper_id", "chunk_type", "chunk_index", "text"}
+	if len(include) != len(want) {
+		t.Fatalf("payload include = %#v, want %#v", include, want)
+	}
+	for index, field := range want {
+		if include[index] != field {
+			t.Errorf("payload include[%d] = %q, want %q", index, include[index], field)
+		}
+	}
+}
+
+// Protects activation actions switch alias atomically.
+func TestActivationActionsSwitchAliasAtomically(t *testing.T) {
+	actions := activationActions("current", "generation-old", "generation-new")
+	if len(actions) != 2 {
+		t.Fatalf("activation actions = %d, want delete-alias and create-alias", len(actions))
+	}
+	deleted := actions[0].GetDeleteAlias()
+	created := actions[1].GetCreateAlias()
+	if deleted == nil || deleted.GetAliasName() != "current" {
+		t.Fatalf("delete action = %#v, want current alias", deleted)
+	}
+	if created == nil || created.GetAliasName() != "current" || created.GetCollectionName() != "generation-new" {
+		t.Fatalf("create action = %#v, want current -> generation-new", created)
 	}
 }

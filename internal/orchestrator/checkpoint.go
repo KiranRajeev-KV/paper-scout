@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/paper-scout/internal/logger"
@@ -13,8 +14,12 @@ import (
 )
 
 func (o *Orchestrator) stageCompleted(ctx context.Context, p *Pipeline, stage Stage, output interface{}) (bool, error) {
+	runID, err := uuid.Parse(p.RunID)
+	if err != nil {
+		return false, fmt.Errorf("invalid pipeline run ID %q: %w", p.RunID, err)
+	}
 	checkpoint, err := o.postgres.Queries().GetPipelineStage(ctx, postgres.GetPipelineStageParams{
-		RunID: parseUUID(p.RunID),
+		RunID: runID,
 		Stage: string(stage),
 	})
 	if err != nil {
@@ -36,10 +41,14 @@ func (o *Orchestrator) stageCompleted(ctx context.Context, p *Pipeline, stage St
 }
 
 func (o *Orchestrator) startStage(ctx context.Context, p *Pipeline, stage Stage) error {
-	err := o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+	runID, topicID, err := pipelineIDs(p)
+	if err != nil {
+		return err
+	}
+	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.StartPipelineStage(ctx, postgres.StartPipelineStageParams{
-			RunID:   parseUUID(p.RunID),
-			TopicID: parseUUID(p.TopicID),
+			RunID:   runID,
+			TopicID: topicID,
 			Stage:   string(stage),
 		}); err != nil {
 			return fmt.Errorf("start %s checkpoint: %w", stage, err)
@@ -50,13 +59,17 @@ func (o *Orchestrator) startStage(ctx context.Context, p *Pipeline, stage Stage)
 }
 
 func (o *Orchestrator) completeStage(ctx context.Context, p *Pipeline, stage Stage, output interface{}) error {
+	runID, _, err := pipelineIDs(p)
+	if err != nil {
+		return err
+	}
 	data, err := json.Marshal(output)
 	if err != nil {
 		return fmt.Errorf("encode %s checkpoint: %w", stage, err)
 	}
 	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.CompletePipelineStage(ctx, postgres.CompletePipelineStageParams{
-			RunID:  parseUUID(p.RunID),
+			RunID:  runID,
 			Stage:  string(stage),
 			Output: data,
 		}); err != nil {
@@ -68,16 +81,20 @@ func (o *Orchestrator) completeStage(ctx context.Context, p *Pipeline, stage Sta
 }
 
 func (o *Orchestrator) failStage(ctx context.Context, p *Pipeline, stage Stage, stageErr error) error {
-	err := o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+	runID, topicID, err := pipelineIDs(p)
+	if err != nil {
+		return err
+	}
+	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.StartPipelineStage(ctx, postgres.StartPipelineStageParams{
-			RunID:   parseUUID(p.RunID),
-			TopicID: parseUUID(p.TopicID),
+			RunID:   runID,
+			TopicID: topicID,
 			Stage:   string(stage),
 		}); err != nil {
 			return fmt.Errorf("start failed %s checkpoint: %w", stage, err)
 		}
 		if _, err := q.FailPipelineStage(ctx, postgres.FailPipelineStageParams{
-			RunID:        parseUUID(p.RunID),
+			RunID:        runID,
 			Stage:        string(stage),
 			ErrorMessage: pgtype.Text{String: stageErr.Error(), Valid: true},
 		}); err != nil {
@@ -86,7 +103,7 @@ func (o *Orchestrator) failStage(ctx context.Context, p *Pipeline, stage Stage, 
 		return updateTopicState(ctx, q, p)
 	})
 	if err != nil {
-		logger.Warn().Err(err).Str("stage", string(stage)).Msg("Failed to persist pipeline stage failure")
+		logger.From(ctx).Warn().Err(err).Str("stage", string(stage)).Msg("Failed to persist pipeline stage failure")
 	}
 	return err
 }
@@ -98,12 +115,28 @@ func (o *Orchestrator) persistTerminalState(ctx context.Context, p *Pipeline) er
 }
 
 func updateTopicState(ctx context.Context, q *postgres.Queries, p *Pipeline) error {
-	_, err := q.UpdateResearchTopicState(ctx, postgres.UpdateResearchTopicStateParams{
-		ID:           parseUUID(p.TopicID),
+	id, err := uuid.Parse(p.TopicID)
+	if err != nil {
+		return fmt.Errorf("invalid pipeline topic ID %q: %w", p.TopicID, err)
+	}
+	_, err = q.UpdateResearchTopicState(ctx, postgres.UpdateResearchTopicStateParams{
+		ID:           id,
 		Status:       p.Status,
 		CurrentStage: string(p.Stage),
 		Progress:     p.Progress,
 		ErrorMessage: pgtype.Text{String: p.Error, Valid: p.Error != ""},
 	})
 	return err
+}
+
+func pipelineIDs(p *Pipeline) (uuid.UUID, uuid.UUID, error) {
+	runID, err := uuid.Parse(p.RunID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid pipeline run ID %q: %w", p.RunID, err)
+	}
+	topicID, err := uuid.Parse(p.TopicID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid pipeline topic ID %q: %w", p.TopicID, err)
+	}
+	return runID, topicID, nil
 }

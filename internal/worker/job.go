@@ -24,6 +24,9 @@ type Job struct {
 	CreatedAt time.Time              `json:"created_at"`
 	Retries   int                    `json:"retries"`
 	MaxRetry  int                    `json:"max_retry"`
+	RunID     string                 `json:"run_id,omitempty"`
+	TopicID   string                 `json:"topic_id,omitempty"`
+	TraceID   string                 `json:"trace_id,omitempty"`
 }
 
 func NewJob(jobType Type, payload map[string]interface{}) Job {
@@ -36,7 +39,15 @@ func NewJob(jobType Type, payload map[string]interface{}) Job {
 		CreatedAt: time.Now(),
 		Retries:   0,
 		MaxRetry:  3,
+		TopicID:   stringValue(payload, "topic_id"),
+		RunID:     stringValue(payload, "run_id"),
+		TraceID:   stringValue(payload, "trace_id"),
 	}
+}
+
+func stringValue(values map[string]interface{}, key string) string {
+	value, _ := values[key].(string)
+	return value
 }
 
 func NewJobWithTimeout(jobType Type, payload map[string]interface{}, timeout time.Duration) Job {

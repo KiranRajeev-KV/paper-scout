@@ -8,6 +8,7 @@ import (
 	"github.com/paper-scout/internal/storage/postgres"
 )
 
+// Protects build gap prompt uses stable paper indices.
 func TestBuildGapPromptUsesStablePaperIndices(t *testing.T) {
 	papers := []*postgres.GetPapersByTopicForAnalysisRow{
 		{ID: uuid.New(), Title: "First paper"},
@@ -24,6 +25,7 @@ func TestBuildGapPromptUsesStablePaperIndices(t *testing.T) {
 	}
 }
 
+// Protects build gap prompt includes retrieved chunk with paper index.
 func TestBuildGapPromptIncludesRetrievedChunkWithPaperIndex(t *testing.T) {
 	paper := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New(), Title: "Retrieved paper"}
 	prompt := buildGapPrompt("test topic", []*postgres.GetPapersByTopicForAnalysisRow{paper}, []retrievedChunk{{
@@ -41,6 +43,7 @@ func TestBuildGapPromptIncludesRetrievedChunkWithPaperIndex(t *testing.T) {
 	}
 }
 
+// Protects resolve gap references maps full uui ds.
 func TestResolveGapReferencesMapsFullUUIDs(t *testing.T) {
 	paperA := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New()}
 	paperB := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New()}
@@ -63,6 +66,24 @@ func TestResolveGapReferencesMapsFullUUIDs(t *testing.T) {
 	}
 }
 
+// Protects gap storage from truncating valid titles or descriptions.
+func TestResolveGapReferencesPreservesLongText(t *testing.T) {
+	paper := &postgres.GetPapersByTopicForAnalysisRow{ID: uuid.New()}
+	title := strings.Repeat("t", 61)
+	description := strings.Repeat("d", 101)
+	gaps, err := resolveGapReferences([]gapDetectionItem{{
+		GapType: "limitation", Title: title, Description: description,
+		EvidenceIndices: []int{1}, RelatedPaperIndices: []int{1},
+	}}, []*postgres.GetPapersByTopicForAnalysisRow{paper})
+	if err != nil {
+		t.Fatalf("resolveGapReferences returned error: %v", err)
+	}
+	if gaps[0].Title != title || gaps[0].Description != description {
+		t.Fatalf("gap text was truncated: %+v", gaps[0])
+	}
+}
+
+// Protects resolve gap references rejects invalid and duplicate indices.
 func TestResolveGapReferencesRejectsInvalidAndDuplicateIndices(t *testing.T) {
 	papers := []*postgres.GetPapersByTopicForAnalysisRow{{ID: uuid.New()}, {ID: uuid.New()}}
 	for name, indices := range map[string][]int{
@@ -80,6 +101,7 @@ func TestResolveGapReferencesRejectsInvalidAndDuplicateIndices(t *testing.T) {
 	}
 }
 
+// Protects resolve gap references rejects malformed gap fields.
 func TestResolveGapReferencesRejectsMalformedGapFields(t *testing.T) {
 	papers := []*postgres.GetPapersByTopicForAnalysisRow{{ID: uuid.New()}}
 	base := gapDetectionItem{

@@ -3,7 +3,7 @@ package bibtex
 import (
 	"fmt"
 	"strings"
-	"time"
+	"unicode"
 )
 
 type Entry struct {
@@ -33,11 +33,11 @@ func (g *Generator) Generate(entry *Entry) string {
 	b.WriteString("@" + entryType + "{" + entry.ID + ",\n")
 
 	if len(entry.Authors) > 0 {
-		b.WriteString(fmt.Sprintf("  author = {%s},\n", strings.Join(entry.Authors, " and ")))
+		writeField(&b, "author", strings.Join(entry.Authors, " and "))
 	}
 
 	if entry.Title != "" {
-		b.WriteString(fmt.Sprintf("  title = {%s},\n", entry.Title))
+		writeField(&b, "title", entry.Title)
 	}
 
 	if entry.Year > 0 {
@@ -47,41 +47,146 @@ func (g *Generator) Generate(entry *Entry) string {
 	if entry.Venue != "" {
 		switch entryType {
 		case "inproceedings":
-			b.WriteString(fmt.Sprintf("  booktitle = {%s},\n", entry.Venue))
+			writeField(&b, "booktitle", entry.Venue)
 		case "article":
-			b.WriteString(fmt.Sprintf("  journal = {%s},\n", entry.Venue))
+			writeField(&b, "journal", entry.Venue)
 		default:
-			b.WriteString(fmt.Sprintf("  journal = {%s},\n", entry.Venue))
+			writeField(&b, "journal", entry.Venue)
 		}
 	}
 
 	if entry.Publisher != "" {
-		b.WriteString(fmt.Sprintf("  publisher = {%s},\n", entry.Publisher))
+		writeField(&b, "publisher", entry.Publisher)
 	}
 
 	if entry.DOI != "" {
-		b.WriteString(fmt.Sprintf("  doi = {%s},\n", entry.DOI))
+		writeField(&b, "doi", entry.DOI)
 	}
 
 	if entry.URL != "" {
-		b.WriteString(fmt.Sprintf("  url = {%s},\n", entry.URL))
+		writeField(&b, "url", entry.URL)
 	}
 
 	if entry.ArXivID != "" {
-		b.WriteString(fmt.Sprintf("  eprint = {%s},\n", entry.ArXivID))
+		writeField(&b, "eprint", entry.ArXivID)
 		b.WriteString("  archiveprefix = {arXiv},\n")
 	}
 
 	if entry.Abstract != "" {
-		abstract := strings.ReplaceAll(entry.Abstract, "\n", " ")
-		abstract = strings.ReplaceAll(abstract, "{", "\\{")
-		abstract = strings.ReplaceAll(abstract, "}", "\\}")
-		b.WriteString(fmt.Sprintf("  abstract = {%s},\n", abstract))
+		writeField(&b, "abstract", entry.Abstract)
 	}
 
 	b.WriteString("}\n")
 
 	return b.String()
+}
+
+func writeField(b *strings.Builder, name, value string) {
+	fmt.Fprintf(b, "  %s = {%s},\n", name, sanitizeField(value))
+}
+
+// sanitizeField converts untrusted API metadata into a valid, readable BibTeX
+// field. Source metadata is plain text, not trusted LaTeX: grouping braces and
+// presentational commands are flattened before the remaining TeX-special
+// characters are escaped by this serializer.
+func sanitizeField(value string) string {
+	plain := flattenTeX(value)
+	var b strings.Builder
+	for _, r := range plain {
+		switch r {
+		case '\\':
+			b.WriteString("\\textbackslash{}")
+		case '{':
+			b.WriteString("\\textbraceleft{}")
+		case '}':
+			b.WriteString("\\textbraceright{}")
+		case '%', '&', '#', '$', '_':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '^':
+			b.WriteString("\\textasciicircum{}")
+		case '~':
+			b.WriteString("\\textasciitilde{}")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func flattenTeX(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+
+	return strings.TrimSpace(flattenTeXFragment(b.String()))
+}
+
+func flattenTeXFragment(value string) string {
+	var b strings.Builder
+	for i := 0; i < len(value); {
+		switch value[i] {
+		case '{', '}':
+			// Braces in externally supplied metadata are TeX grouping, not
+			// bibliography structure. Dropping them also tolerates malformed
+			// unmatched groups from upstream sources.
+			i++
+		case '\\':
+			i++
+			if i >= len(value) {
+				break
+			}
+			if isTeXLetter(value[i]) {
+				start := i
+				for i < len(value) && isTeXLetter(value[i]) {
+					i++
+				}
+				command := value[start:i]
+				switch command {
+				case "LaTeX":
+					b.WriteString("LaTeX")
+				case "TeX":
+					b.WriteString("TeX")
+				case "ldots", "dots":
+					b.WriteString("…")
+				default:
+					// Formatting commands such as \textbf and \emph commonly
+					// precede a brace-delimited argument, which the main loop
+					// retains as readable text. Unknown commands are discarded
+					// rather than emitted as executable LaTeX.
+				}
+				continue
+			}
+			switch value[i] {
+			case '{':
+				b.WriteByte('{')
+			case '}':
+				b.WriteByte('}')
+			case '%', '&', '#', '$', '_', '^', '~', '\\':
+				b.WriteByte(value[i])
+			case ' ':
+				b.WriteByte(' ')
+			default:
+				b.WriteByte(value[i])
+			}
+			i++
+		default:
+			b.WriteByte(value[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+func isTeXLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func (g *Generator) GenerateBatch(entries []*Entry) string {
@@ -121,83 +226,4 @@ func (g *Generator) determineType(entry *Entry) string {
 	}
 
 	return "misc"
-}
-
-func GenerateID(entry *Entry) string {
-	var parts []string
-
-	if len(entry.Authors) > 0 {
-		author := entry.Authors[0]
-		words := strings.Fields(author)
-		if len(words) > 0 {
-			surname := words[len(words)-1]
-			surname = strings.ToLower(surname)
-			surname = strings.Map(func(r rune) rune {
-				if r >= 'a' && r <= 'z' {
-					return r
-				}
-				return -1
-			}, surname)
-			parts = append(parts, surname)
-		}
-	}
-
-	if entry.Year > 0 {
-		parts = append(parts, fmt.Sprintf("%d", entry.Year))
-	}
-
-	if entry.Title != "" {
-		words := strings.Fields(entry.Title)
-		for _, word := range words {
-			if len(word) > 4 {
-				word = strings.ToLower(word)
-				word = strings.Map(func(r rune) rune {
-					if r >= 'a' && r <= 'z' {
-						return r
-					}
-					return -1
-				}, word)
-				if word != "" {
-					parts = append(parts, word)
-					break
-				}
-			}
-		}
-	}
-
-	if len(parts) == 0 {
-		return fmt.Sprintf("unknown_%d", time.Now().UnixNano())
-	}
-
-	return strings.Join(parts, "_")
-}
-
-func FromPaper(paper interface {
-	GetDOI() string
-	GetArXivID() string
-}, title string, authors []string, year int, venue, url, abstract string) *Entry {
-	id := GenerateID(&Entry{
-		Authors: authors,
-		Title:   title,
-		Year:    year,
-	})
-
-	if doiGetter, ok := paper.(interface{ GetDOI() string }); ok {
-		if id == "" || strings.HasPrefix(id, "unknown") {
-			if doi := doiGetter.GetDOI(); doi != "" {
-				id = strings.ReplaceAll(doi, "/", "_")
-			}
-		}
-	}
-
-	return &Entry{
-		ID:       id,
-		Type:     "article",
-		Authors:  authors,
-		Title:    title,
-		Year:     year,
-		Venue:    venue,
-		URL:      url,
-		Abstract: abstract,
-	}
 }

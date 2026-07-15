@@ -12,30 +12,23 @@ import (
 )
 
 type StructuredOutput struct {
-	client *Client
+	generator Generator
 }
 
-func NewStructuredOutput(client *Client) *StructuredOutput {
-	return &StructuredOutput{client: client}
+func NewStructuredOutput(generator Generator) *StructuredOutput {
+	return &StructuredOutput{generator: generator}
 }
 
 func (s *StructuredOutput) Generate(ctx context.Context, prompt string, responseSchema interface{}) (string, error) {
-	schema, err := s.buildSchema(responseSchema)
-	if err != nil {
-		return "", fmt.Errorf("failed to build schema: %w", err)
+	if s.generator == nil {
+		return "", fmt.Errorf("generation provider is not configured")
 	}
-
-	cfg := &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-		ResponseSchema:   schema,
-	}
-
-	result, err := s.client.GenerateWithConfig(ctx, prompt, cfg)
+	result, err := s.generator.GenerateStructured(ctx, prompt, responseSchema)
 	if err != nil {
 		return "", fmt.Errorf("structured generation failed: %w", err)
 	}
 
-	logger.Debug().Msg("Structured LLM output generated")
+	logger.From(ctx).Debug().Msg("Structured LLM output generated")
 	return result, nil
 }
 
@@ -50,10 +43,6 @@ func (s *StructuredOutput) GenerateInto(ctx context.Context, prompt string, resp
 	}
 
 	return nil
-}
-
-func (s *StructuredOutput) buildSchema(v interface{}) (*genai.Schema, error) {
-	return inferSchema(v)
 }
 
 func inferSchema(v interface{}) (*genai.Schema, error) {
@@ -132,43 +121,5 @@ func inferSchemaValue(value reflect.Value) (*genai.Schema, error) {
 		return &genai.Schema{Type: genai.TypeObject, Properties: props}, nil
 	default:
 		return &genai.Schema{Type: genai.TypeString}, nil
-	}
-}
-
-func MustSchema(v interface{}) *genai.Schema {
-	schema, err := inferSchema(v)
-	if err != nil {
-		panic(err)
-	}
-	return schema
-}
-
-func StringSchema() *genai.Schema {
-	return &genai.Schema{Type: genai.TypeString}
-}
-
-func IntegerSchema() *genai.Schema {
-	return &genai.Schema{Type: genai.TypeInteger}
-}
-
-func NumberSchema() *genai.Schema {
-	return &genai.Schema{Type: genai.TypeNumber}
-}
-
-func BooleanSchema() *genai.Schema {
-	return &genai.Schema{Type: genai.TypeBoolean}
-}
-
-func ArraySchema(itemSchema *genai.Schema) *genai.Schema {
-	return &genai.Schema{
-		Type:  genai.TypeArray,
-		Items: itemSchema,
-	}
-}
-
-func ObjectSchema(properties map[string]*genai.Schema) *genai.Schema {
-	return &genai.Schema{
-		Type:       genai.TypeObject,
-		Properties: properties,
 	}
 }

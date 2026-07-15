@@ -7,19 +7,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/storage/postgres"
 	"github.com/paper-scout/internal/tools/bibtex"
 )
 
 type ReportGenerator struct {
-	postgres  *postgres.Client
+	postgres  reportStore
 	bibtexGen *bibtex.Generator
+}
+
+type reportStore interface {
+	GetResearchTopic(context.Context, uuid.UUID) (*postgres.ResearchTopic, error)
+	GetPapersByTopicForAnalysis(context.Context, uuid.UUID) ([]*postgres.GetPapersByTopicForAnalysisRow, error)
+	GetResearchGapsByTopic(context.Context, uuid.UUID) ([]*postgres.ResearchGap, error)
+	GetNovelDirectionsByTopic(context.Context, uuid.UUID) ([]*postgres.NovelDirection, error)
 }
 
 func NewReportGenerator(pg *postgres.Client) *ReportGenerator {
 	return &ReportGenerator{
-		postgres:  pg,
+		postgres:  pg.Queries(),
 		bibtexGen: bibtex.NewGenerator(),
 	}
 }
@@ -67,26 +75,30 @@ type DirectionSummary struct {
 }
 
 func (r *ReportGenerator) Generate(ctx context.Context, topicID string) (*Report, error) {
-	logger.Info().Str("topic_id", topicID).Msg("Generating report")
+	logger.From(ctx).Info().Str("topic_id", topicID).Msg("Generating report")
 
-	topic, err := r.postgres.Queries().GetResearchTopic(ctx, pgUUID(topicID))
+	id, err := parseID("topic ID", topicID)
+	if err != nil {
+		return nil, err
+	}
+	topic, err := r.postgres.GetResearchTopic(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get topic: %w", err)
 	}
 
-	papers, err := r.postgres.Queries().GetPapersByTopicForAnalysis(ctx, pgUUID(topicID))
+	papers, err := r.postgres.GetPapersByTopicForAnalysis(ctx, id)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to get papers")
+		return nil, fmt.Errorf("failed to get papers: %w", err)
 	}
 
-	gaps, err := r.postgres.Queries().GetResearchGapsByTopic(ctx, pgUUID(topicID))
+	gaps, err := r.postgres.GetResearchGapsByTopic(ctx, id)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to get research gaps")
+		return nil, fmt.Errorf("failed to get research gaps: %w", err)
 	}
 
-	directions, err := r.postgres.Queries().GetNovelDirectionsByTopic(ctx, pgUUID(topicID))
+	directions, err := r.postgres.GetNovelDirectionsByTopic(ctx, id)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to get novel directions")
+		return nil, fmt.Errorf("failed to get novel directions: %w", err)
 	}
 
 	report := &Report{
@@ -101,7 +113,7 @@ func (r *ReportGenerator) Generate(ctx context.Context, topicID string) (*Report
 	report.LiteratureReview = r.generateLiteratureReview(report.Papers)
 	report.BibTeX = r.generateBibTeX(papers)
 
-	logger.Info().Str("topic_id", topicID).Msg("Report generated")
+	logger.From(ctx).Info().Str("topic_id", topicID).Msg("Report generated")
 
 	return report, nil
 }
@@ -158,11 +170,12 @@ func (r *ReportGenerator) buildDirectionSummaries(directions []*postgres.NovelDi
 
 	for _, d := range directions {
 		summary := DirectionSummary{
-			Title:         d.Title,
-			Description:   pgTextVal(d.Description),
-			Difficulty:    pgTextVal(d.ImplementationComplexity),
-			EstimatedCost: pgTextVal(d.EstimatedCost),
-			TimeToMVP:     pgTextVal(d.TimeToMvp),
+			Title:             d.Title,
+			Description:       pgTextVal(d.Description),
+			Difficulty:        pgTextVal(d.ImplementationComplexity),
+			EstimatedCost:     pgTextVal(d.EstimatedCost),
+			IndustryViability: pgTextVal(d.IndustryViability),
+			TimeToMVP:         pgTextVal(d.TimeToMvp),
 		}
 
 		summary.FeasibilityScore = pgFloat64Val(d.FeasibilityScore)
@@ -181,21 +194,15 @@ func (r *ReportGenerator) generateExecutiveSummary(report *Report) string {
 
 	if len(report.Gaps) > 0 {
 		b.WriteString(fmt.Sprintf("### Research Gaps Identified: %d\n\n", len(report.Gaps)))
-		for i, gap := range report.Gaps {
-			if i >= 5 {
-				break
-			}
-			b.WriteString(fmt.Sprintf("- **%s** (%s): %s\n", gap.Title, gap.Type, truncateText(gap.Description, 100)))
+		for _, gap := range report.Gaps {
+			b.WriteString(fmt.Sprintf("- **%s** (%s): %s\n", gap.Title, gap.Type, gap.Description))
 		}
 		b.WriteString("\n")
 	}
 
 	if len(report.Directions) > 0 {
 		b.WriteString(fmt.Sprintf("### Research Directions Proposed: %d\n\n", len(report.Directions)))
-		for i, dir := range report.Directions {
-			if i >= 3 {
-				break
-			}
+		for _, dir := range report.Directions {
 			b.WriteString(fmt.Sprintf("- **%s** (Difficulty: %s, Score: %.1f)\n", dir.Title, dir.Difficulty, dir.FeasibilityScore))
 		}
 		b.WriteString("\n")
@@ -216,15 +223,8 @@ func (r *ReportGenerator) generateLiteratureReview(papers []PaperSummary) string
 	b.WriteString("| Title | Methodology | Key Findings | Limitations |\n")
 	b.WriteString("|-------|-------------|--------------|-------------|\n")
 
-	for i, p := range papers {
-		if i >= 20 {
-			break
-		}
-		title := truncateText(p.Title, 50)
-		method := truncateText(p.Methodology, 40)
-		findings := truncateText(p.KeyFindings, 40)
-		limits := truncateText(p.Limitations, 40)
-		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", title, method, findings, limits))
+	for _, p := range papers {
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", p.Title, p.Methodology, p.KeyFindings, p.Limitations))
 	}
 
 	return b.String()
@@ -268,7 +268,7 @@ func FormatMarkdown(report *Report) string {
 			b.WriteString(fmt.Sprintf("## %d. %s\n\n", i+1, gap.Title))
 			b.WriteString(fmt.Sprintf("**Type:** %s\n\n", gap.Type))
 			b.WriteString(fmt.Sprintf("**Description:** %s\n\n", gap.Description))
-			b.WriteString(fmt.Sprintf("**Evidence:** %s\n\n", gap.Evidence))
+			b.WriteString(fmt.Sprintf("**Evidence:** %s\n\n", formatEvidenceCitations(gap.Evidence)))
 		}
 	}
 
@@ -292,4 +292,21 @@ func FormatMarkdown(report *Report) string {
 	b.WriteString("\n```\n")
 
 	return b.String()
+}
+
+// formatEvidenceCitations renders the comma-separated paper IDs stored with a
+// research gap as Pandoc/BibLaTeX citations. Paper IDs are the canonical
+// BibTeX entry keys emitted by generateBibTeX, so the rendered report always
+// points to an entry in its References section.
+func formatEvidenceCitations(evidence string) string {
+	keys := make([]string, 0)
+	for _, key := range strings.Split(evidence, ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, "@"+key)
+		}
+	}
+	if len(keys) == 0 {
+		return "Not specified"
+	}
+	return "[" + strings.Join(keys, "; ") + "]"
 }
