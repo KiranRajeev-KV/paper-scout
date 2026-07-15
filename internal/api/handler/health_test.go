@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Protects readiness fails when dependency fails.
 func TestReadinessFailsWhenDependencyFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -39,6 +40,7 @@ func TestReadinessFailsWhenDependencyFails(t *testing.T) {
 	}
 }
 
+// Protects readiness succeeds when all dependencies are healthy.
 func TestReadinessSucceedsWhenAllDependenciesAreHealthy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	dependencies := map[string]healthDependency{}

@@ -1,21 +1,32 @@
 package handler
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/paper-scout/internal/agent"
+	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/orchestrator"
 )
 
 type Handler struct {
-	orch *orchestrator.Orchestrator
+	orch      researchService
+	heartbeat time.Duration
 }
 
-func New(orch *orchestrator.Orchestrator) *Handler {
-	return &Handler{orch: orch}
+type researchService interface {
+	StartResearch(ctx context.Context, topic string) (*orchestrator.Pipeline, error)
+	GetPipeline(ctx context.Context, topicID string) (*orchestrator.Pipeline, error)
+	GetReport(ctx context.Context, topicID string) (*agent.Report, error)
+	GetSSEManager() *orchestrator.SSEManager
+}
+
+func New(orch researchService) *Handler {
+	return &Handler{orch: orch, heartbeat: 30 * time.Second}
 }
 
 type CreateResearchRequest struct {
@@ -24,6 +35,7 @@ type CreateResearchRequest struct {
 
 type CreateResearchResponse struct {
 	TopicID string `json:"topic_id"`
+	RunID   string `json:"run_id"`
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }
@@ -31,18 +43,20 @@ type CreateResearchResponse struct {
 func (h *Handler) CreateResearch(c *gin.Context) {
 	var req CreateResearchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid research request"})
 		return
 	}
 
 	pipeline, err := h.orch.StartResearch(c.Request.Context(), req.Topic)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start research: " + err.Error()})
+		logger.From(c.Request.Context()).Error().Err(err).Msg("Failed to start research")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Research could not be started"})
 		return
 	}
 
 	c.JSON(http.StatusAccepted, CreateResearchResponse{
 		TopicID: pipeline.TopicID,
+		RunID:   pipeline.RunID,
 		Status:  pipeline.Status,
 		Message: "Research started. Use the topic_id to track progress.",
 	})
@@ -50,6 +64,7 @@ func (h *Handler) CreateResearch(c *gin.Context) {
 
 type ResearchResponse struct {
 	TopicID          string              `json:"topic_id"`
+	RunID            string              `json:"run_id"`
 	Topic            string              `json:"topic"`
 	Status           string              `json:"status"`
 	Stage            string              `json:"stage"`
@@ -103,9 +118,9 @@ func (h *Handler) GetResearch(c *gin.Context) {
 		return
 	}
 
-	pipeline, err := h.orch.GetPipeline(topicID)
+	pipeline, err := h.orch.GetPipeline(c.Request.Context(), topicID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Research not found"})
+		writePipelineLookupError(c, err)
 		return
 	}
 
@@ -113,7 +128,8 @@ func (h *Handler) GetResearch(c *gin.Context) {
 	if pipeline.Status == "completed" {
 		report, err = h.orch.GetReport(c.Request.Context(), topicID)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Research result not found"})
+			logger.From(c.Request.Context()).Error().Err(err).Str("topic_id", topicID).Msg("Failed to assemble completed research result")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Research result is temporarily unavailable"})
 			return
 		}
 	}
@@ -124,6 +140,7 @@ func (h *Handler) GetResearch(c *gin.Context) {
 func buildResearchResponse(pipeline *orchestrator.Pipeline, report *agent.Report) ResearchResponse {
 	response := ResearchResponse{
 		TopicID:         pipeline.TopicID,
+		RunID:           pipeline.RunID,
 		Topic:           pipeline.Topic,
 		Status:          pipeline.Status,
 		Stage:           string(pipeline.Stage),
@@ -183,6 +200,7 @@ func buildResearchResponse(pipeline *orchestrator.Pipeline, report *agent.Report
 
 type StatusResponse struct {
 	TopicID  string  `json:"topic_id"`
+	RunID    string  `json:"run_id"`
 	Status   string  `json:"status"`
 	Stage    string  `json:"stage"`
 	Progress float64 `json:"progress"`
@@ -196,19 +214,31 @@ func (h *Handler) GetStatus(c *gin.Context) {
 		return
 	}
 
-	pipeline, err := h.orch.GetPipeline(topicID)
+	pipeline, err := h.orch.GetPipeline(c.Request.Context(), topicID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Research not found"})
+		writePipelineLookupError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, StatusResponse{
 		TopicID:  pipeline.TopicID,
+		RunID:    pipeline.RunID,
 		Status:   pipeline.Status,
 		Stage:    string(pipeline.Stage),
 		Progress: pipeline.Progress,
 		Error:    pipeline.Error,
 	})
+}
+
+func writePipelineLookupError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, orchestrator.ErrInvalidTopicID):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid topic ID"})
+	case errors.Is(err, orchestrator.ErrPipelineNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Research not found"})
+	default:
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Research state unavailable"})
+	}
 }
 
 func (h *Handler) Stream(c *gin.Context) {
@@ -218,23 +248,38 @@ func (h *Handler) Stream(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
-
-	sse := h.orch.GetSSEManager()
-	ch := sse.Subscribe(topicID)
-	defer sse.Unsubscribe(topicID, ch)
+	pipeline, err := h.orch.GetPipeline(c.Request.Context(), topicID)
+	if err != nil {
+		writePipelineLookupError(c, err)
+		return
+	}
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streaming not supported"})
 		return
 	}
+	controller := http.NewResponseController(c.Writer)
+	if err := controller.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streaming deadline configuration failed"})
+		return
+	}
 
-	c.SSEvent("connected", gin.H{"topic_id": topicID})
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	sse := h.orch.GetSSEManager()
+	ch := sse.Subscribe(topicID)
+	defer sse.Unsubscribe(topicID, ch)
+	if latest, lookupErr := h.orch.GetPipeline(c.Request.Context(), topicID); lookupErr == nil {
+		pipeline = latest
+	}
+
+	c.SSEvent("status", StatusResponse{TopicID: pipeline.TopicID, RunID: pipeline.RunID, Status: pipeline.Status, Stage: string(pipeline.Stage), Progress: pipeline.Progress, Error: pipeline.Error})
 	flusher.Flush()
+	ticker := time.NewTicker(h.heartbeat)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -244,9 +289,11 @@ func (h *Handler) Stream(c *gin.Context) {
 			if !ok {
 				return
 			}
-			c.Writer.Write(data)
+			if _, err := c.Writer.Write(data); err != nil {
+				return
+			}
 			flusher.Flush()
-		case <-time.After(30 * time.Second):
+		case <-ticker.C:
 			c.SSEvent("ping", gin.H{"time": time.Now().Unix()})
 			flusher.Flush()
 		}
@@ -260,9 +307,13 @@ func (h *Handler) GetReport(c *gin.Context) {
 		return
 	}
 
+	if !h.requireCompleted(c, topicID) {
+		return
+	}
 	report, err := h.orch.GetReport(c.Request.Context(), topicID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Report not found"})
+		logger.From(c.Request.Context()).Error().Err(err).Str("topic_id", topicID).Msg("Failed to assemble Markdown report")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Report is temporarily unavailable"})
 		return
 	}
 
@@ -278,13 +329,30 @@ func (h *Handler) GetBibTeX(c *gin.Context) {
 		return
 	}
 
+	if !h.requireCompleted(c, topicID) {
+		return
+	}
 	report, err := h.orch.GetReport(c.Request.Context(), topicID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Report not found"})
+		logger.From(c.Request.Context()).Error().Err(err).Str("topic_id", topicID).Msg("Failed to assemble BibTeX report")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "BibTeX is temporarily unavailable"})
 		return
 	}
 
 	c.Header("Content-Type", "text/plain")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=references-%s.bib", topicID))
 	c.String(http.StatusOK, report.BibTeX)
+}
+
+func (h *Handler) requireCompleted(c *gin.Context, topicID string) bool {
+	pipeline, err := h.orch.GetPipeline(c.Request.Context(), topicID)
+	if err != nil {
+		writePipelineLookupError(c, err)
+		return false
+	}
+	if pipeline.Status != "completed" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Research report is not available until the pipeline completes", "status": pipeline.Status, "stage": pipeline.Stage})
+		return false
+	}
+	return true
 }

@@ -1,10 +1,12 @@
 package orchestrator
 
 import (
+	"context"
 	"sync"
 	"testing"
 )
 
+// Protects concurrent pipeline status reads.
 func TestConcurrentPipelineStatusReads(t *testing.T) {
 	o := &Orchestrator{pipelines: make(map[string]*Pipeline)}
 	working := &Pipeline{TopicID: "topic-1", Status: "processing", Stage: StagePending}
@@ -27,7 +29,7 @@ func TestConcurrentPipelineStatusReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 1000; j++ {
-				pipeline, err := o.GetPipeline("topic-1")
+				pipeline, err := o.GetPipeline(context.Background(), "topic-1")
 				if err != nil {
 					t.Errorf("GetPipeline returned error: %v", err)
 					return

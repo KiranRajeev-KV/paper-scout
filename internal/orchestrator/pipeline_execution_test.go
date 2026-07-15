@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -11,6 +12,44 @@ import (
 	"github.com/paper-scout/internal/config"
 )
 
+// Protects pipeline stops when analysis batch fails.
+func TestPipelineStopsWhenAnalysisBatchFails(t *testing.T) {
+	var executed []Stage
+	o := newStageTestOrchestrator(func(stage Stage) { executed = append(executed, stage) })
+	o.analyzePapersFn = func(context.Context, string, []agent.RankedPaper) error {
+		executed = append(executed, StageAnalysis)
+		return errors.New("one paper failed")
+	}
+	pipeline := &Pipeline{TopicID: "topic-1", RunID: "run-1", Topic: "test topic", StartedAt: time.Now()}
+
+	o.runPipelineWithContext(context.Background(), pipeline)
+
+	if pipeline.Status != "failed" || pipeline.Stage != StageFailed {
+		t.Fatalf("pipeline terminal state = %s/%s, want failed", pipeline.Status, pipeline.Stage)
+	}
+	want := []Stage{StageQueryExpand, StageDiscovery, StageRanking, StageAnalysis}
+	if !reflect.DeepEqual(executed, want) {
+		t.Fatalf("executed stages = %v, want %v", executed, want)
+	}
+}
+
+// Protects pipeline does not publish completed before durable persistence.
+func TestPipelineDoesNotPublishCompletedBeforeDurablePersistence(t *testing.T) {
+	o := newStageTestOrchestrator(func(Stage) {})
+	o.persistTerminalStateFn = func(context.Context, *Pipeline) error {
+		return errors.New("database unavailable")
+	}
+	pipeline := &Pipeline{TopicID: "topic-1", RunID: "run-1", Topic: "test topic", StartedAt: time.Now()}
+
+	o.runPipelineWithContext(context.Background(), pipeline)
+
+	published, ok := o.pipelines[pipeline.TopicID]
+	if !ok || published.Status != "failed" || published.Stage != StageFailed {
+		t.Fatalf("published pipeline = %+v, want failed state only", published)
+	}
+}
+
+// Protects pipeline executes seven stages in order.
 func TestPipelineExecutesSevenStagesInOrder(t *testing.T) {
 	var executed []Stage
 	var mu sync.Mutex
@@ -28,6 +67,7 @@ func TestPipelineExecutesSevenStagesInOrder(t *testing.T) {
 	}
 }
 
+// Protects recovered pipeline resumes from checkpoint.
 func TestRecoveredPipelineResumesFromCheckpoint(t *testing.T) {
 	var executed []Stage
 	var mu sync.Mutex
@@ -65,6 +105,7 @@ func newStageTestOrchestrator(record func(Stage)) *Orchestrator {
 	o.stageCompletedFn = func(context.Context, *Pipeline, Stage, interface{}) (bool, error) { return false, nil }
 	o.startStageFn = func(context.Context, *Pipeline, Stage) error { return nil }
 	o.completeStageFn = func(context.Context, *Pipeline, Stage, interface{}) error { return nil }
+	o.failStageFn = func(context.Context, *Pipeline, Stage, error) error { return nil }
 	o.persistTerminalStateFn = func(context.Context, *Pipeline) error { return nil }
 	o.expandFn = func(context.Context, string, string) (*agent.ExpandedQuery, error) {
 		record(StageQueryExpand)

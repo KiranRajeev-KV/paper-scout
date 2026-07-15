@@ -9,6 +9,7 @@ import (
 	"github.com/paper-scout/internal/orchestrator"
 )
 
+// Protects build research response uses documented structured fields.
 func TestBuildResearchResponseUsesDocumentedStructuredFields(t *testing.T) {
 	pipeline := &orchestrator.Pipeline{
 		TopicID:   "topic-1",
@@ -50,6 +51,7 @@ func TestBuildResearchResponseUsesDocumentedStructuredFields(t *testing.T) {
 	}
 }
 
+// Protects full research response contract.
 func TestFullResearchResponseContract(t *testing.T) {
 	pipeline := &orchestrator.Pipeline{
 		TopicID: "topic-1", Topic: "test topic", Status: "completed", Stage: orchestrator.StageCompleted, Progress: 1, StartedAt: time.Now(),
@@ -80,6 +82,7 @@ func TestFullResearchResponseContract(t *testing.T) {
 	}
 }
 
+// Protects build research response does not require report while processing.
 func TestBuildResearchResponseDoesNotRequireReportWhileProcessing(t *testing.T) {
 	pipeline := &orchestrator.Pipeline{
 		TopicID:   "topic-1",
