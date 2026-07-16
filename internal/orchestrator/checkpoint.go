@@ -13,12 +13,25 @@ import (
 	"github.com/paper-scout/internal/storage/postgres"
 )
 
-func (o *Orchestrator) stageCompleted(ctx context.Context, p *Pipeline, stage Stage, output interface{}) (bool, error) {
+// CheckpointService owns durable pipeline-stage transitions.
+type CheckpointService struct {
+	postgres *postgres.Client
+}
+
+// NewCheckpointService constructs a checkpoint service backed by PostgreSQL.
+func NewCheckpointService(pg *postgres.Client) (*CheckpointService, error) {
+	if pg == nil {
+		return nil, fmt.Errorf("checkpoint service requires postgres")
+	}
+	return &CheckpointService{postgres: pg}, nil
+}
+
+func (s *CheckpointService) stageCompleted(ctx context.Context, p *Pipeline, stage Stage, output interface{}) (bool, error) {
 	runID, err := uuid.Parse(p.RunID)
 	if err != nil {
 		return false, fmt.Errorf("invalid pipeline run ID %q: %w", p.RunID, err)
 	}
-	checkpoint, err := o.postgres.Queries().GetPipelineStage(ctx, postgres.GetPipelineStageParams{
+	checkpoint, err := s.postgres.Queries().GetPipelineStage(ctx, postgres.GetPipelineStageParams{
 		RunID: runID,
 		Stage: string(stage),
 	})
@@ -40,12 +53,12 @@ func (o *Orchestrator) stageCompleted(ctx context.Context, p *Pipeline, stage St
 	return true, nil
 }
 
-func (o *Orchestrator) startStage(ctx context.Context, p *Pipeline, stage Stage) error {
+func (s *CheckpointService) startStage(ctx context.Context, p *Pipeline, stage Stage) error {
 	runID, topicID, err := pipelineIDs(p)
 	if err != nil {
 		return err
 	}
-	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+	err = s.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.StartPipelineStage(ctx, postgres.StartPipelineStageParams{
 			RunID:   runID,
 			TopicID: topicID,
@@ -58,7 +71,7 @@ func (o *Orchestrator) startStage(ctx context.Context, p *Pipeline, stage Stage)
 	return err
 }
 
-func (o *Orchestrator) completeStage(ctx context.Context, p *Pipeline, stage Stage, output interface{}) error {
+func (s *CheckpointService) completeStage(ctx context.Context, p *Pipeline, stage Stage, output interface{}) error {
 	runID, _, err := pipelineIDs(p)
 	if err != nil {
 		return err
@@ -67,7 +80,7 @@ func (o *Orchestrator) completeStage(ctx context.Context, p *Pipeline, stage Sta
 	if err != nil {
 		return fmt.Errorf("encode %s checkpoint: %w", stage, err)
 	}
-	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+	err = s.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.CompletePipelineStage(ctx, postgres.CompletePipelineStageParams{
 			RunID:  runID,
 			Stage:  string(stage),
@@ -80,12 +93,12 @@ func (o *Orchestrator) completeStage(ctx context.Context, p *Pipeline, stage Sta
 	return err
 }
 
-func (o *Orchestrator) failStage(ctx context.Context, p *Pipeline, stage Stage, stageErr error) error {
+func (s *CheckpointService) failStage(ctx context.Context, p *Pipeline, stage Stage, stageErr error) error {
 	runID, topicID, err := pipelineIDs(p)
 	if err != nil {
 		return err
 	}
-	err = o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+	err = s.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		if _, err := q.StartPipelineStage(ctx, postgres.StartPipelineStageParams{
 			RunID:   runID,
 			TopicID: topicID,
@@ -108,8 +121,8 @@ func (o *Orchestrator) failStage(ctx context.Context, p *Pipeline, stage Stage, 
 	return err
 }
 
-func (o *Orchestrator) persistTerminalState(ctx context.Context, p *Pipeline) error {
-	return o.postgres.WithTx(ctx, func(q *postgres.Queries) error {
+func (s *CheckpointService) persistTerminalState(ctx context.Context, p *Pipeline) error {
+	return s.postgres.WithTx(ctx, func(q *postgres.Queries) error {
 		return updateTopicState(ctx, q, p)
 	})
 }

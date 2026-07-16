@@ -59,7 +59,7 @@ check:
     go test ./...
     go build ./...
 
-# Rebuild the configured embedding generation and atomically activate it.
+# Rebuild the configured embedding generation with durable, recoverable activation.
 reindex:
     go run ./cmd/reindex
 

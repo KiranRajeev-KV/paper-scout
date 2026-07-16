@@ -65,13 +65,25 @@ The report and BibTeX endpoints return `409 Conflict` until the status is `compl
 
 ## Rebuild embeddings
 
-After changing any embedding model, dimensions, instruction version, or indexing version, build a new generation and atomically point the Qdrant alias to it:
+After changing any embedding model, dimensions, instruction version, or indexing version, build a new generation and run recoverable activation:
 
 ```bash
 just reindex
 ```
 
 The command is interruptible with `Ctrl-C`; it does not discover papers or re-run reports.
+
+Inspect activation with the following commands. A successful reindex leaves exactly one active database generation, an alias that points to its collection, and no `pending`, `alias_switched`, or `failed` intent. The previous active collection remains available for recovery and is never deleted by this workflow.
+
+```bash
+curl -sS http://localhost:6333/aliases | jq
+docker compose exec postgres psql -U research -d research_agent \
+  -c "SELECT id, collection_name, status, activated_at FROM embedding_generations WHERE status = 'active';"
+docker compose exec postgres psql -U research -d research_agent \
+  -c "SELECT id, generation_id, target_collection, expected_alias, previous_collection, status, attempts, last_error, created_at, updated_at FROM embedding_activation_intents WHERE status <> 'completed' ORDER BY created_at;"
+```
+
+If startup reports an incomplete activation, inspect those results, correct the reported Qdrant/database problem, and restart the server. Startup performs idempotent reconciliation only; it does not begin a full reindex automatically. If reconciliation reports an unexpected alias target, it fails closed and leaves the alias unchanged.
 
 ## Tests and quality checks
 
@@ -113,7 +125,9 @@ docker compose exec postgres psql -U research -d research_agent \
 docker compose exec postgres psql -U research -d research_agent \
   -c "SELECT stage, status, attempt, error_message FROM pipeline_stage_checkpoints WHERE topic_id = '$TOPIC_ID' ORDER BY created_at;"
 docker compose exec redis redis-cli GET "pipeline:$TOPIC_ID"
-docker compose exec redis redis-cli XINFO GROUPS paper_scout_jobs
+docker compose exec redis redis-cli XLEN jobs:stream
+docker compose exec redis redis-cli XPENDING jobs:stream jobs:workers
+docker compose exec redis redis-cli LLEN jobs:failed
 ```
 
 Inspect the active vector alias and application logs:

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -8,7 +9,7 @@ import (
 
 // Protects sse broadcast concurrent unsubscribe.
 func TestSSEBroadcastConcurrentUnsubscribe(t *testing.T) {
-	manager := NewSSEManager()
+	manager := NewSSEManager(context.Background())
 	const subscribers = 8
 
 	channels := make([]chan []byte, 0, subscribers)
@@ -39,7 +40,7 @@ func TestSSEBroadcastConcurrentUnsubscribe(t *testing.T) {
 
 // Protects sse slow subscriber does not block broadcast.
 func TestSSESlowSubscriberDoesNotBlockBroadcast(t *testing.T) {
-	manager := NewSSEManager()
+	manager := NewSSEManager(context.Background())
 	channel := manager.Subscribe("topic-1")
 	defer manager.Unsubscribe("topic-1", channel)
 	done := make(chan struct{})
@@ -58,7 +59,7 @@ func TestSSESlowSubscriberDoesNotBlockBroadcast(t *testing.T) {
 
 // Protects shutdown from leaving an SSE handler blocked on its subscription.
 func TestSSECloseAllClosesExistingAndFutureSubscriptions(t *testing.T) {
-	manager := NewSSEManager()
+	manager := NewSSEManager(context.Background())
 	active := manager.Subscribe("topic-1")
 
 	manager.CloseAll()

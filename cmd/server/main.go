@@ -10,19 +10,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 	"github.com/paper-scout/internal/accelerator"
 	"github.com/paper-scout/internal/api"
 	"github.com/paper-scout/internal/api/handler"
+	"github.com/paper-scout/internal/application"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/llm"
 	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/ollama"
-	"github.com/paper-scout/internal/orchestrator"
+	"github.com/paper-scout/internal/reindex"
 	"github.com/paper-scout/internal/storage/postgres"
 	"github.com/paper-scout/internal/storage/qdrant"
 	"github.com/paper-scout/internal/storage/redis"
 	"github.com/paper-scout/internal/tools/arxiv"
+	"github.com/paper-scout/internal/tools/embedding"
 	"github.com/paper-scout/internal/tools/pdf"
 	"github.com/paper-scout/internal/tools/semantic_scholar"
 )
@@ -36,8 +39,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "No .env file found, using environment variables")
 	}
 
-	ctx := context.Background()
-	appCtx, appCancel := context.WithCancel(ctx)
+	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
 	cfg, err := config.LoadDefault()
@@ -59,25 +61,21 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
 		return 1
 	}
-	if err := logger.Install(logManager); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to install logging: %v\n", err)
-		_ = logManager.Close()
-		return 1
-	}
 	defer logManager.Close()
+	appContext := logManager.App().WithContext(appCtx)
 
-	logger.Info().Str("version", "1.0.0").Msg("Starting Paper Scout")
+	logger.From(appContext).Info().Str("version", "1.0.0").Msg("Starting Paper Scout")
 
-	pg, err := postgres.NewClient(ctx, cfg.Database.Postgres)
+	pg, err := postgres.NewClient(appContext, cfg.Database.Postgres)
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to connect to Postgres")
+		logger.From(appContext).Error().Err(err).Msg("Failed to connect to Postgres")
 		return 1
 	}
 	defer pg.Close()
 
-	redisClient, err := redis.NewClient(ctx, cfg.Database.Redis)
+	redisClient, err := redis.NewClient(appContext, cfg.Database.Redis)
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to connect to Redis")
+		logger.From(appContext).Error().Err(err).Msg("Failed to connect to Redis")
 		return 1
 	}
 	defer redisClient.Close()
@@ -90,29 +88,54 @@ func run() int {
 		IndexingVersion: cfg.Embedding.IndexingVersion, Gate: gate,
 	})
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to create embedding provider")
+		logger.From(appContext).Error().Err(err).Msg("Failed to create embedding provider")
 		return 1
 	}
-	if err := embeddingProvider.Health(ctx); err != nil {
-		logger.Error().Err(err).Str("provider", "ollama").Str("model", cfg.Embedding.Model).Msg("Embedding provider is not ready")
+	if err := embeddingProvider.Health(appContext); err != nil {
+		logger.From(appContext).Error().Err(err).Str("provider", "ollama").Str("model", cfg.Embedding.Model).Msg("Embedding provider is not ready")
 		return 1
 	}
 	identity := embeddingProvider.Identity()
-	qdrantClient, err := qdrant.NewClient(ctx, cfg.Database.Qdrant, qdrant.Schema{
-		Dimensions: identity.Dimensions, GenerationSuffix: identity.CollectionSuffix(),
-	})
+	schema := qdrant.Schema{Dimensions: identity.Dimensions, GenerationSuffix: identity.CollectionSuffix()}
+	reindexClient, err := qdrant.NewReindexClient(appContext, cfg.Database.Qdrant, schema)
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to connect to Qdrant")
+		logger.From(appContext).Error().Err(err).Msg("Failed to connect to Qdrant")
+		return 1
+	}
+	reconciler, err := reindex.NewReconciler(pg, reindexClient)
+	if err == nil {
+		err = reconciler.Reconcile(appContext)
+	}
+	if closeErr := reindexClient.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		logger.From(appContext).Error().Err(err).Msg("Failed to reconcile Qdrant activation")
+		return 1
+	}
+	qdrantClient, err := qdrant.NewClient(appContext, cfg.Database.Qdrant, schema)
+	if err != nil {
+		logger.From(appContext).Error().Err(err).Msg("Failed to open active Qdrant collection")
 		return 1
 	}
 	defer qdrantClient.Close()
-
+	activeGeneration, activeErr := pg.Queries().GetActiveEmbeddingGeneration(appContext)
+	if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		logger.From(appContext).Error().Err(activeErr).Msg("Failed to inspect active embedding generation")
+		return 1
+	}
+	if activeErr == nil {
+		if err := validateActiveEmbeddingGeneration(activeGeneration, identity, qdrantClient.PhysicalCollectionName()); err != nil {
+			logger.From(appContext).Error().Err(err).Msg("Active embedding generation is incompatible with startup configuration")
+			return 1
+		}
+	}
 	var generator llm.Generator
 	switch cfg.Generation.Provider {
 	case "gemini":
-		gemini, createErr := llm.NewClient(ctx, cfg.Generation.Gemini)
+		gemini, createErr := llm.NewClient(appContext, cfg.Generation.Gemini)
 		if createErr != nil {
-			logger.Error().Err(createErr).Msg("Failed to create Gemini generator")
+			logger.From(appContext).Error().Err(createErr).Msg("Failed to create Gemini generator")
 			return 1
 		}
 		generator = gemini
@@ -125,16 +148,16 @@ func run() int {
 			Gate: gate,
 		})
 		if createErr != nil {
-			logger.Error().Err(createErr).Msg("Failed to create Ollama generator")
+			logger.From(appContext).Error().Err(createErr).Msg("Failed to create Ollama generator")
 			return 1
 		}
 		generator = local
 	default:
-		logger.Error().Str("provider", cfg.Generation.Provider).Msg("Unsupported generation provider")
+		logger.From(appContext).Error().Str("provider", cfg.Generation.Provider).Msg("Unsupported generation provider")
 		return 1
 	}
-	if err := generator.Health(ctx); err != nil {
-		logger.Error().Err(err).Str("provider", generator.Provider()).Str("model", generator.Model()).Msg("Generation provider is not ready")
+	if err := generator.Health(appContext); err != nil {
+		logger.From(appContext).Error().Err(err).Str("provider", generator.Provider()).Str("model", generator.Model()).Msg("Generation provider is not ready")
 		return 1
 	}
 	docling, err := pdf.NewDoclingClient(pdf.DoclingConfig{
@@ -145,32 +168,23 @@ func run() int {
 		MinExtractedCharacters: cfg.APIs.Docling.MinExtractedCharacters, Gate: gate,
 	})
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to create Docling parser")
+		logger.From(appContext).Error().Err(err).Msg("Failed to create Docling parser")
 		return 1
 	}
-	if err := docling.Health(ctx); err != nil {
-		logger.Error().Err(err).Str("provider", docling.Provider()).Str("version", docling.Version()).Msg("Document parser is not ready")
+	if err := docling.Health(appContext); err != nil {
+		logger.From(appContext).Error().Err(err).Str("provider", docling.Provider()).Str("version", docling.Version()).Msg("Document parser is not ready")
 		return 1
 	}
 
-	ssClient := semantic_scholar.NewClient(cfg.APIs.SemanticScholar)
-	arxivClient := arxiv.NewClient(cfg.APIs.ArXiv)
+	ssClient := semantic_scholar.NewClient(appContext, cfg.APIs.SemanticScholar)
+	arxivClient := arxiv.NewClient(appContext, cfg.APIs.ArXiv)
 
-	orch, err := orchestrator.NewOrchestrator(
-		appCtx,
-		cfg,
-		logManager,
-		pg,
-		redisClient,
-		qdrantClient,
-		generator,
-		embeddingProvider,
-		docling,
-		ssClient,
-		arxivClient,
-	)
+	orch, err := application.NewResearchService(appCtx, cfg, logManager, application.Dependencies{
+		Postgres: pg, Redis: redisClient, Qdrant: qdrantClient, Generator: generator, EmbeddingProvider: embeddingProvider,
+		Parser: docling, SemanticScholar: ssClient, Arxiv: arxivClient,
+	})
 	if err != nil {
-		logger.Error().Err(err).Msg("Failed to create orchestrator")
+		logger.From(appContext).Error().Err(err).Msg("Failed to create orchestrator")
 		return 1
 	}
 
@@ -182,7 +196,11 @@ func run() int {
 		"embedding":  handler.HealthCheckFunc(embeddingProvider.Health),
 		"docling":    handler.HealthCheckFunc(docling.Health),
 	})
-	router := api.SetupRouter(orch, health, cfg.Server)
+	router, err := api.SetupRouter(orch, health, cfg.Server, logManager)
+	if err != nil {
+		logger.From(appContext).Error().Err(err).Msg("Failed to create HTTP router")
+		return 1
+	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
@@ -199,7 +217,7 @@ func run() int {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		logger.Info().Str("addr", addr).Msg("Server starting")
+		logger.From(appContext).Info().Str("addr", addr).Msg("Server starting")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
@@ -210,16 +228,16 @@ func run() int {
 	var exitCode int
 	select {
 	case sig := <-quit:
-		logger.Info().Str("signal", sig.String()).Msg("Shutdown signal received")
+		logger.From(appContext).Info().Str("signal", sig.String()).Msg("Shutdown signal received")
 	case err := <-serverErr:
-		logger.Error().Err(err).Msg("Server failed")
+		logger.From(appContext).Error().Err(err).Msg("Server failed")
 		exitCode = 1
 	}
 	signal.Stop(quit)
 
-	logger.Info().Msg("Shutting down server...")
+	logger.From(appContext).Info().Msg("Shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(appContext), 30*time.Second)
 	defer cancel()
 	orchestratorDone := make(chan struct{})
 	go func() {
@@ -227,15 +245,32 @@ func run() int {
 		close(orchestratorDone)
 	}()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Warn().Err(err).Msg("Graceful server shutdown timed out; forcing active connections closed")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.From(appContext).Warn().Err(err).Msg("Graceful server shutdown timed out; forcing active connections closed")
 		if closeErr := srv.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
-			logger.Error().Err(closeErr).Msg("Forced server shutdown failed")
+			logger.From(appContext).Error().Err(closeErr).Msg("Forced server shutdown failed")
 			exitCode = 1
 		}
 	}
 	<-orchestratorDone
 
-	logger.Info().Msg("Server stopped")
+	logger.From(appContext).Info().Msg("Server stopped")
 	return exitCode
+}
+
+func validateActiveEmbeddingGeneration(generation *postgres.EmbeddingGeneration, identity embedding.Identity, aliasTarget string) error {
+	if generation.CollectionName != aliasTarget {
+		return fmt.Errorf("active embedding generation collection %q does not match Qdrant alias target %q", generation.CollectionName, aliasTarget)
+	}
+	activeIdentity := embedding.Identity{
+		Provider:           generation.Provider,
+		Model:              generation.Model,
+		Dimensions:         int(generation.Dimensions),
+		InstructionVersion: generation.InstructionVersion,
+		IndexingVersion:    generation.IndexingVersion,
+	}
+	if activeIdentity != identity {
+		return fmt.Errorf("active embedding generation identity %s does not match configured embedding identity %s; run just reindex before startup", activeIdentity.String(), identity.String())
+	}
+	return nil
 }

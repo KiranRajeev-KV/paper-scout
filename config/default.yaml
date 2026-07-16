@@ -138,7 +138,6 @@ pipeline:
   max_retrieved_chunks: 12
   pdf_indexing_timeout: 10m
   embedding_batch_size: 10
-  use_redis_queue: true
 
 logging:
   level: info

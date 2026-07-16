@@ -9,11 +9,14 @@ import (
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/logger"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 )
 
+// Client owns independent Redis control-plane and blocking-worker clients.
 type Client struct {
 	controlClient *redis.Client
 	workerClient  *redis.Client
+	log           zerolog.Logger
 }
 
 func NewClient(ctx context.Context, cfg config.RedisConfig) (*Client, error) {
@@ -31,14 +34,14 @@ func NewClient(ctx context.Context, cfg config.RedisConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to ping Redis worker client: %w", err)
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("addr", cfg.Addr()).
 		Int("db", cfg.DB).
 		Int("control_pool_size", cfg.PoolSize).
 		Int("worker_pool_size", cfg.WorkerPoolSize).
 		Msg("Connected to Redis")
 
-	return &Client{controlClient: controlClient, workerClient: workerClient}, nil
+	return &Client{controlClient: controlClient, workerClient: workerClient, log: *logger.From(ctx)}, nil
 }
 
 func newRedisClient(cfg config.RedisConfig, poolSize int) *redis.Client {
@@ -54,7 +57,7 @@ func (c *Client) Close() error {
 	controlErr := c.controlClient.Close()
 	workerErr := c.workerClient.Close()
 	if controlErr == nil && workerErr == nil {
-		logger.Info().Msg("Redis connection closed")
+		c.log.Info().Msg("Redis connection closed")
 	}
 	if controlErr != nil {
 		return controlErr

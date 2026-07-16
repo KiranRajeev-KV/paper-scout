@@ -116,7 +116,7 @@ func (q *Queue) Enqueue(ctx context.Context, job Job) error {
 		return fmt.Errorf("failed to enqueue job: %w", err)
 	}
 
-	logger.Debug().
+	logger.From(ctx).Debug().
 		Str("job_id", job.ID).
 		Str("type", string(job.Type)).
 		Msg("Job enqueued")
@@ -186,7 +186,7 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, e
 			},
 		})
 
-		logger.Warn().
+		logger.From(ctx).Warn().
 			Str("job_id", job.ID).
 			Int("retry", job.Retries).
 			Str("error", errMsg).
@@ -203,7 +203,7 @@ func (q *Queue) Fail(ctx context.Context, job Job, errMsg string) (FailResult, e
 		}
 		pipe.RPush(ctx, JobQueueDeadLetter, failedData)
 
-		logger.Error().
+		logger.From(ctx).Error().
 			Str("job_id", job.ID).
 			Int("retries", job.Retries).
 			Str("error", errMsg).

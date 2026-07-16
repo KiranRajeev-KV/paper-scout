@@ -23,7 +23,6 @@ type Analyzer struct {
 	structured *llm.StructuredOutput
 	pool       *worker.Pool
 	jobTimeout time.Duration
-	dispatchMu sync.Mutex
 	mu         sync.Mutex
 	batches    map[string]*analysisBatch
 	jobToBatch map[string]string
@@ -111,8 +110,8 @@ func (a *Analyzer) Analyze(ctx context.Context, topicID string, papers []Analysi
 	}
 	a.mu.Unlock()
 
+	jobs := make([]worker.Job, 0, len(papers))
 	for _, paper := range papers {
-		a.dispatchMu.Lock()
 		job := worker.NewJobWithTimeout(worker.TypePaperAnalysis, map[string]interface{}{
 			"paper_id": paper.ID,
 			"topic_id": topicID,
@@ -123,38 +122,23 @@ func (a *Analyzer) Analyze(ctx context.Context, topicID string, papers []Analysi
 		a.mu.Lock()
 		a.jobToBatch[job.ID] = batchID
 		a.mu.Unlock()
+		jobs = append(jobs, job)
+	}
 
+	for index, job := range jobs {
 		if err := a.pool.Submit(job); err != nil {
-			a.dispatchMu.Unlock()
-			a.cancelBatch(batchID)
-			return fmt.Errorf("failed to submit analysis job for paper %s: %w", paper.ID, err)
+			err = fmt.Errorf("submit analysis job %s: %w", job.ID, err)
+			a.HandleJobCompletion(job, err, true)
+			for _, unsent := range jobs[index+1:] {
+				unsentErr := fmt.Errorf("not submitted after analysis submission failure")
+				a.HandleJobCompletion(unsent, unsentErr, true)
+			}
+			break
 		}
-		if err := a.waitForJob(ctx, batch, job.ID); err != nil {
-			a.dispatchMu.Unlock()
-			a.cancelBatch(batchID)
-			return err
-		}
-		a.dispatchMu.Unlock()
 	}
 
 	logger.From(ctx).Info().Msg("All paper analysis jobs completed")
 	return a.waitForBatch(ctx, batchID)
-}
-
-func (a *Analyzer) waitForJob(ctx context.Context, batch *analysisBatch, jobID string) error {
-	for {
-		a.mu.Lock()
-		_, pending := a.jobToBatch[jobID]
-		a.mu.Unlock()
-		if !pending {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-batch.updated:
-		}
-	}
 }
 
 func (a *Analyzer) HandleJob(ctx context.Context, job worker.Job) error {

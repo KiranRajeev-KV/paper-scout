@@ -222,22 +222,63 @@ LOCK TABLE paper_chunks IN SHARE ROW EXCLUSIVE MODE;
 
 -- name: CreateEmbeddingGeneration :one
 INSERT INTO embedding_generations (
-    provider, model, dimensions, instruction_version, indexing_version, collection_name, status
-) VALUES ($1, $2, $3, $4, $5, $6, 'building')
-ON CONFLICT (provider, model, dimensions, instruction_version, indexing_version) DO UPDATE SET
-    collection_name = EXCLUDED.collection_name,
-    status = CASE WHEN embedding_generations.status = 'active' THEN 'active' ELSE 'building' END,
-    error_message = NULL,
-    updated_at = NOW()
+    id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, 'building')
 RETURNING *;
+
+-- name: MarkEmbeddingGenerationReady :one
+UPDATE embedding_generations
+SET status = 'ready', indexed_chunks = $2, error_message = NULL, updated_at = NOW()
+WHERE id = $1 AND status = 'building'
+RETURNING *;
+
+-- name: FailEmbeddingGeneration :one
+UPDATE embedding_generations
+SET status = 'failed', error_message = $2, updated_at = NOW()
+WHERE id = $1 AND status IN ('building', 'ready')
+RETURNING *;
+
+-- name: CreateEmbeddingActivationIntent :one
+INSERT INTO embedding_activation_intents (
+    generation_id, target_collection, alias_name, previous_collection,
+    expected_point_count, chunk_snapshot_digest, status, attempts, last_error
+) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, NULL)
+RETURNING *;
+
+-- name: GetPendingEmbeddingActivationIntent :one
+SELECT * FROM embedding_activation_intents
+WHERE status IN ('pending', 'alias_switched', 'failed')
+ORDER BY created_at
+LIMIT 1;
+
+-- name: GetEmbeddingActivationIntent :one
+SELECT * FROM embedding_activation_intents WHERE id = $1;
+
+-- name: MarkEmbeddingActivationAliasSwitched :one
+UPDATE embedding_activation_intents
+SET status = 'alias_switched', attempts = attempts + 1, last_error = NULL, updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: CompleteEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'completed', last_error = NULL, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: FailEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'failed', last_error = $2, updated_at = NOW()
+WHERE id = $1 RETURNING *;
+
+-- name: SupersedeEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'superseded', last_error = $2, updated_at = NOW()
+WHERE id = $1 RETURNING *;
 
 -- name: GetActiveEmbeddingGeneration :one
 SELECT * FROM embedding_generations WHERE status = 'active';
 
--- name: GetEmbeddingGenerationByIdentity :one
-SELECT * FROM embedding_generations
-WHERE provider = $1 AND model = $2 AND dimensions = $3
-  AND instruction_version = $4 AND indexing_version = $5;
+-- name: GetEmbeddingGeneration :one
+SELECT * FROM embedding_generations WHERE id = $1;
 
 -- name: UpdateEmbeddingGenerationProgress :one
 UPDATE embedding_generations SET indexed_chunks = $2, error_message = $3, updated_at = NOW()

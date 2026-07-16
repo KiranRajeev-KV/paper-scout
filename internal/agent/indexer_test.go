@@ -21,8 +21,8 @@ func TestIndexerTerminalFailuresCompleteBatch(t *testing.T) {
 	indexer.jobToBatch[first.ID] = batchID
 	indexer.jobToBatch[second.ID] = batchID
 
-	indexer.HandleJobCompletion(first, errors.New("PDF unavailable"), true)
-	indexer.HandleJobCompletion(second, errors.New("embedding unavailable"), true)
+	indexer.HandleJobCompletion(t.Context(), first, errors.New("PDF unavailable"), true)
+	indexer.HandleJobCompletion(t.Context(), second, errors.New("embedding unavailable"), true)
 
 	select {
 	case <-batch.done:

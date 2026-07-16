@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/logger"
 	"github.com/qdrant/go-client/qdrant"
@@ -18,17 +19,20 @@ type Schema struct {
 type Client struct {
 	client             *qdrant.Client
 	alias              string
+	collectionPrefix   string
+	generationSuffix   string
 	physicalCollection string
 	writeCollection    string
 	queryCollection    string
 	dimensions         int
 }
 
+// NewClient opens the collection selected by the configured active alias.
 func NewClient(ctx context.Context, cfg config.QdrantConfig, schema Schema) (*Client, error) {
 	return newClient(ctx, cfg, schema, true)
 }
 
-// NewReindexClient targets an inactive physical generation until Activate is called.
+// NewReindexClient creates a client that must be prepared for one generation before writes.
 func NewReindexClient(ctx context.Context, cfg config.QdrantConfig, schema Schema) (*Client, error) {
 	return newClient(ctx, cfg, schema, false)
 }
@@ -44,26 +48,23 @@ func newClient(ctx context.Context, cfg config.QdrantConfig, schema Schema, requ
 		return nil, fmt.Errorf("failed to create qdrant client: %w", err)
 	}
 
-	physical := cfg.CollectionPrefix + "_" + schema.GenerationSuffix
 	c := &Client{
-		client:             client,
-		alias:              cfg.Alias,
-		physicalCollection: physical,
-		writeCollection:    physical,
-		queryCollection:    physical,
-		dimensions:         schema.Dimensions,
+		client:           client,
+		alias:            cfg.Alias,
+		collectionPrefix: cfg.CollectionPrefix,
+		generationSuffix: schema.GenerationSuffix,
+		dimensions:       schema.Dimensions,
 	}
 
-	if err := c.ensureCollection(ctx, requireActive); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("failed to ensure collection: %w", err)
-	}
 	if requireActive {
-		c.writeCollection = c.alias
-		c.queryCollection = c.alias
+		err = c.openActiveCollection(ctx)
+	}
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("open Qdrant collection: %w", err)
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("host", cfg.Host).
 		Int("port", cfg.Port).
 		Str("alias", c.alias).
@@ -73,15 +74,37 @@ func newClient(ctx context.Context, cfg config.QdrantConfig, schema Schema, requ
 	return c, nil
 }
 
-func (c *Client) ensureCollection(ctx context.Context, requireActive bool) error {
-	exists, err := c.client.CollectionExists(ctx, c.physicalCollection)
+func (c *Client) openActiveCollection(ctx context.Context) error {
+	target, err := c.AliasTarget(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to check collection %q: %w", c.physicalCollection, err)
+		return err
+	}
+	if target == "" {
+		target = c.bootstrapCollectionName()
+		if err := c.ensureCollection(ctx, target); err != nil {
+			return err
+		}
+		if err := c.client.CreateAlias(ctx, c.alias, target); err != nil {
+			return fmt.Errorf("create initial Qdrant alias %q: %w", c.alias, err)
+		}
+	} else if err := c.ensureCollection(ctx, target); err != nil {
+		return err
+	}
+	c.physicalCollection = target
+	c.writeCollection = c.alias
+	c.queryCollection = c.alias
+	return nil
+}
+
+func (c *Client) ensureCollection(ctx context.Context, collection string) error {
+	exists, err := c.client.CollectionExists(ctx, collection)
+	if err != nil {
+		return fmt.Errorf("failed to check collection %q: %w", collection, err)
 	}
 
 	if !exists {
 		err = c.client.CreateCollection(ctx, &qdrant.CreateCollection{
-			CollectionName: c.physicalCollection,
+			CollectionName: collection,
 			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
 				Size:     uint64(c.dimensions),
 				Distance: qdrant.Distance_Cosine,
@@ -90,49 +113,26 @@ func (c *Client) ensureCollection(ctx context.Context, requireActive bool) error
 		if err != nil {
 			return fmt.Errorf("failed to create collection: %w", err)
 		}
-		logger.Info().Str("collection", c.physicalCollection).Msg("Created Qdrant collection")
+		logger.From(ctx).Info().Str("collection", collection).Msg("Created Qdrant collection")
 	}
 
-	info, err := c.client.GetCollectionInfo(ctx, c.physicalCollection)
+	info, err := c.client.GetCollectionInfo(ctx, collection)
 	if err != nil {
-		return fmt.Errorf("failed to inspect collection %q: %w", c.physicalCollection, err)
+		return fmt.Errorf("failed to inspect collection %q: %w", collection, err)
 	}
-	if err := validateCollectionSchema(c.physicalCollection, info, c.dimensions); err != nil {
+	if err := validateCollectionSchema(collection, info, c.dimensions); err != nil {
 		return err
 	}
-	if err := c.ensureTopicIDIndex(ctx); err != nil {
+	if err := c.ensureTopicIDIndex(ctx, collection); err != nil {
 		return err
-	}
-	if requireActive {
-		return c.ensureAlias(ctx)
 	}
 	return nil
 }
 
-func (c *Client) ensureAlias(ctx context.Context) error {
-	aliases, err := c.client.ListAliases(ctx)
-	if err != nil {
-		return fmt.Errorf("list Qdrant aliases: %w", err)
-	}
-	for _, alias := range aliases {
-		if alias.GetAliasName() != c.alias {
-			continue
-		}
-		if alias.GetCollectionName() != c.physicalCollection {
-			return fmt.Errorf("Qdrant alias %q targets %q, but embedding identity requires %q; run `go run ./cmd/reindex` to build and activate the new generation", c.alias, alias.GetCollectionName(), c.physicalCollection)
-		}
-		return nil
-	}
-	if err := c.client.CreateAlias(ctx, c.alias, c.physicalCollection); err != nil {
-		return fmt.Errorf("create Qdrant alias %q: %w", c.alias, err)
-	}
-	return nil
-}
-
-func (c *Client) ensureTopicIDIndex(ctx context.Context) error {
+func (c *Client) ensureTopicIDIndex(ctx context.Context, collection string) error {
 	wait := true
 	_, err := c.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
-		CollectionName: c.physicalCollection,
+		CollectionName: collection,
 		FieldName:      "topic_id",
 		FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
 		Wait:           &wait,
@@ -141,6 +141,38 @@ func (c *Client) ensureTopicIDIndex(ctx context.Context) error {
 		return fmt.Errorf("failed to create topic_id payload index: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) bootstrapCollectionName() string {
+	return c.collectionPrefix + "_" + c.generationSuffix
+}
+
+// GenerationCollectionName returns the unique physical collection for one durable generation.
+func GenerationCollectionName(prefix, identitySuffix string, generationID uuid.UUID) string {
+	return prefix + "_" + identitySuffix + "_" + generationID.String()
+}
+
+// CollectionNameForGeneration returns the inactive collection name for one generation ID.
+func (c *Client) CollectionNameForGeneration(generationID uuid.UUID) string {
+	return GenerationCollectionName(c.collectionPrefix, c.generationSuffix, generationID)
+}
+
+// PrepareGeneration creates and selects the inactive collection for one durable generation.
+func (c *Client) PrepareGeneration(ctx context.Context, generationID uuid.UUID) (string, error) {
+	if generationID == uuid.Nil {
+		return "", fmt.Errorf("Qdrant generation ID is required")
+	}
+	collection := c.CollectionNameForGeneration(generationID)
+	if c.physicalCollection != "" && c.physicalCollection != collection {
+		return "", fmt.Errorf("Qdrant client already targets generation collection %q", c.physicalCollection)
+	}
+	if err := c.ensureCollection(ctx, collection); err != nil {
+		return "", err
+	}
+	c.physicalCollection = collection
+	c.writeCollection = collection
+	c.queryCollection = collection
+	return collection, nil
 }
 
 func validateCollectionSchema(collection string, info *qdrant.CollectionInfo, dimensions int) error {
@@ -329,7 +361,94 @@ func (c *Client) CollectionName() string {
 	return c.alias
 }
 
+// AliasName returns the stable alias controlled by this client.
+func (c *Client) AliasName() string { return c.alias }
+
+// PhysicalCollectionName returns the physical collection currently selected by this client.
 func (c *Client) PhysicalCollectionName() string { return c.physicalCollection }
+
+// AliasTarget returns the physical collection currently selected by the stable alias.
+func (c *Client) AliasTarget(ctx context.Context) (string, error) {
+	aliases, err := c.client.ListAliases(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list Qdrant aliases: %w", err)
+	}
+	for _, alias := range aliases {
+		if alias.GetAliasName() == c.alias {
+			return alias.GetCollectionName(), nil
+		}
+	}
+	return "", nil
+}
+
+// ValidateCollection verifies the vector schema and exact point count of a physical collection.
+func (c *Client) ValidateCollection(ctx context.Context, collection string, expectedPoints uint64) error {
+	info, err := c.client.GetCollectionInfo(ctx, collection)
+	if err != nil {
+		return fmt.Errorf("inspect Qdrant collection %q: %w", collection, err)
+	}
+	if err := validateCollectionSchema(collection, info, c.dimensions); err != nil {
+		return err
+	}
+	count, err := c.client.Count(ctx, &qdrant.CountPoints{CollectionName: collection, Exact: qdrant.PtrOf(true)})
+	if err != nil {
+		return fmt.Errorf("count Qdrant collection %q: %w", collection, err)
+	}
+	if count != expectedPoints {
+		return fmt.Errorf("Qdrant collection %q contains %d points; expected %d", collection, count, expectedPoints)
+	}
+	return nil
+}
+
+// ActivateExpected switches the alias only when its current target is the recorded previous collection.
+func (c *Client) ActivateExpected(ctx context.Context, previous, target string) error {
+	current, err := c.AliasTarget(ctx)
+	if err != nil {
+		return err
+	}
+	if current == target {
+		c.physicalCollection = target
+		c.writeCollection, c.queryCollection = c.alias, c.alias
+		return nil
+	}
+	if current != previous {
+		return fmt.Errorf("Qdrant alias %q targets %q; expected previous %q or target %q", c.alias, current, previous, target)
+	}
+	actions := activationActions(c.alias, current, target)
+	if err := c.client.UpdateAliases(ctx, actions); err != nil {
+		return fmt.Errorf("activate Qdrant collection %q through alias %q: %w", target, c.alias, err)
+	}
+	c.physicalCollection = target
+	c.writeCollection, c.queryCollection = c.alias, c.alias
+	return nil
+}
+
+// RestoreExpected restores the recorded previous alias target after a failed activation.
+func (c *Client) RestoreExpected(ctx context.Context, target, previous string) error {
+	current, err := c.AliasTarget(ctx)
+	if err != nil {
+		return err
+	}
+	if current == previous {
+		return nil
+	}
+	if current != target {
+		return fmt.Errorf("Qdrant alias %q targets %q; expected target %q or previous %q", c.alias, current, target, previous)
+	}
+	if previous == "" {
+		if err := c.client.UpdateAliases(ctx, []*qdrant.AliasOperations{qdrant.NewAliasDelete(c.alias)}); err != nil {
+			return fmt.Errorf("remove Qdrant alias %q after failed activation: %w", c.alias, err)
+		}
+		c.physicalCollection, c.writeCollection, c.queryCollection = "", "", ""
+		return nil
+	}
+	if err := c.client.UpdateAliases(ctx, activationActions(c.alias, current, previous)); err != nil {
+		return fmt.Errorf("restore Qdrant alias %q to collection %q: %w", c.alias, previous, err)
+	}
+	c.physicalCollection = previous
+	c.writeCollection, c.queryCollection = c.alias, c.alias
+	return nil
+}
 
 // Activate atomically switches the stable alias to this physical generation.
 func (c *Client) Activate(ctx context.Context) error {

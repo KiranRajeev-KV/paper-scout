@@ -35,7 +35,7 @@ func (o *recordingObserver) count(kind string) int {
 }
 
 func testPolicy(observer Observer) *Policy {
-	return New("test", Config{
+	return New(context.Background(), "test", Config{
 		MaxRetries:       2,
 		BaseBackoff:      time.Millisecond,
 		MaxBackoff:       2 * time.Millisecond,
@@ -106,7 +106,7 @@ func TestRetryAfterParsesSecondsAndHTTPDate(t *testing.T) {
 func TestPolicyCancellationStopsBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	policy := New("test", Config{MaxRetries: 2, BaseBackoff: time.Second, MaxBackoff: time.Second}, 0, 0, nil)
+	policy := New(context.Background(), "test", Config{MaxRetries: 2, BaseBackoff: time.Second, MaxBackoff: time.Second}, 0, 0, nil)
 	started := make(chan struct{})
 	done := make(chan struct{})
 	go func() {

@@ -26,13 +26,14 @@ type Client struct {
 	policy     *httpresilience.Policy
 }
 
-func NewClient(cfg config.ArXivConfig) *Client {
+// NewClient constructs an arXiv client with policy lifecycle logs owned by ctx.
+func NewClient(ctx context.Context, cfg config.ArXivConfig) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
 		baseURL: cfg.BaseURL,
-		policy: httpresilience.New("arxiv", httpresilience.Config{
+		policy: httpresilience.New(ctx, "arxiv", httpresilience.Config{
 			MaxRetries: cfg.Resilience.MaxRetries, BaseBackoff: cfg.Resilience.BaseBackoff,
 			MaxBackoff: cfg.Resilience.MaxBackoff, FailureThreshold: cfg.Resilience.FailureThreshold,
 			OpenTimeout: cfg.Resilience.OpenTimeout,

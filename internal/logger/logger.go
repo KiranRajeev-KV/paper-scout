@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -49,8 +48,7 @@ func (w *lockedWriter) Write(data []byte) (int, error) {
 	return w.w.Write(data)
 }
 
-var installed atomic.Pointer[Manager]
-var fallback = zerolog.New(os.Stderr).With().Timestamp().Logger()
+var fallback = zerolog.New(io.Discard).With().Timestamp().Logger()
 
 func NewManager(cfg Config) (*Manager, error) {
 	if cfg.Directory == "" {
@@ -81,17 +79,6 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	app := zerolog.New(output).Level(level).With().Timestamp().Logger()
 	return &Manager{app: app, appFile: file, appWriter: fileWriter, directory: cfg.Directory, level: level, runs: make(map[string]*runLog), topics: make(map[string]string)}, nil
-}
-
-// Install makes one fully initialized manager available to legacy process-level call sites.
-func Install(manager *Manager) error {
-	if manager == nil {
-		return fmt.Errorf("logger manager is nil")
-	}
-	if !installed.CompareAndSwap(nil, manager) {
-		return fmt.Errorf("logger manager is already installed")
-	}
-	return nil
 }
 
 func (m *Manager) App() *zerolog.Logger { return &m.app }
@@ -183,16 +170,5 @@ func From(ctx context.Context) *zerolog.Logger {
 			return value
 		}
 	}
-	return Get()
-}
-
-func Get() *zerolog.Logger {
-	if manager := installed.Load(); manager != nil {
-		return manager.App()
-	}
 	return &fallback
 }
-func Debug() *zerolog.Event { return Get().Debug() }
-func Info() *zerolog.Event  { return Get().Info() }
-func Warn() *zerolog.Event  { return Get().Warn() }
-func Error() *zerolog.Event { return Get().Error() }

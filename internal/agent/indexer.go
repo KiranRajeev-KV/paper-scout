@@ -149,12 +149,12 @@ func (i *Indexer) submitAsync(job worker.Job) {
 	}
 }
 
-func (i *Indexer) HandleJobCompletion(job worker.Job, err error, terminal bool) {
+func (i *Indexer) HandleJobCompletion(ctx context.Context, job worker.Job, err error, terminal bool) {
 	if !terminal || (job.Type != worker.TypePDFDownload && job.Type != worker.TypeEmbedding && job.Type != worker.TypeEmbeddingBatch) {
 		return
 	}
 	if err != nil && (job.Type == worker.TypeEmbedding || job.Type == worker.TypeEmbeddingBatch) {
-		if recordErr := i.recordEmbeddingFailure(job, err); recordErr != nil {
+		if recordErr := i.recordEmbeddingFailure(ctx, job, err); recordErr != nil {
 			err = errors.Join(err, recordErr)
 		}
 	}
@@ -226,7 +226,7 @@ func (i *Indexer) cancelBatch(batchID string) {
 	}
 }
 
-func (i *Indexer) recordEmbeddingFailure(job worker.Job, cause error) error {
+func (i *Indexer) recordEmbeddingFailure(ctx context.Context, job worker.Job, cause error) error {
 	if i.postgres == nil {
 		return nil
 	}
@@ -243,7 +243,7 @@ func (i *Indexer) recordEmbeddingFailure(job worker.Job, cause error) error {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var failures []error
 	for _, chunkID := range chunkIDs {
@@ -259,7 +259,7 @@ func (i *Indexer) recordEmbeddingFailure(job worker.Job, cause error) error {
 			ErrorMessage:    pgtype.Text{String: cause.Error(), Valid: true},
 		})
 		if updateErr != nil {
-			logger.Warn().Err(updateErr).Str("chunk_id", parsedChunkID.String()).Msg("Failed to record terminal chunk embedding failure")
+			logger.From(ctx).Warn().Err(updateErr).Str("chunk_id", parsedChunkID.String()).Msg("Failed to record terminal chunk embedding failure")
 			failures = append(failures, fmt.Errorf("record failed embedding chunk %s: %w", parsedChunkID, updateErr))
 		}
 	}

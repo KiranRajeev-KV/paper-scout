@@ -3,6 +3,7 @@ package qdrant
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	qdrantapi "github.com/qdrant/go-client/qdrant"
 )
 
@@ -52,6 +53,18 @@ func TestValidateCollectionSchema(t *testing.T) {
 				t.Fatalf("validateCollectionSchema error = %v, want success = %v", err, tt.want)
 			}
 		})
+	}
+}
+
+// Protects repeated embedding identities receive distinct physical generations.
+func TestGenerationCollectionNameIncludesGenerationID(t *testing.T) {
+	first := GenerationCollectionName("paper_embeddings", "qwen3", uuid.New())
+	second := GenerationCollectionName("paper_embeddings", "qwen3", uuid.New())
+	if first == second {
+		t.Fatalf("generation collection names match: %q", first)
+	}
+	if want := "paper_embeddings_qwen3_"; len(first) <= len(want) || first[:len(want)] != want {
+		t.Fatalf("generation collection name = %q, want prefix %q", first, want)
 	}
 }
 

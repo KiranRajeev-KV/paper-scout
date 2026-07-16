@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func testHTTPPolicy() *httpresilience.Policy {
-	return httpresilience.New("test", httpresilience.Config{
+	return httpresilience.New(context.Background(), "test", httpresilience.Config{
 		MaxRetries:       1,
 		BaseBackoff:      time.Millisecond,
 		MaxBackoff:       time.Millisecond,

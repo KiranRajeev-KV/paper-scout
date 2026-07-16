@@ -2,7 +2,7 @@
 
 ## Scope
 
-Paper Scout is a Go 1.24 asynchronous research API. Read the relevant implementation and tests before changing behavior; do not infer contracts from file names. HTTP behavior lives in `internal/api`, pipeline behavior in `internal/orchestrator` and `internal/agent`, and persistence contracts in `migrations/` plus `internal/storage/postgres/queries.sql`.
+Paper Scout is a Go 1.24 asynchronous research API. Read the relevant implementation and tests before changing behavior; do not infer contracts from file names. HTTP behavior lives in `internal/api`; application wiring is in `internal/application`; pipeline coordination is in `internal/orchestrator`; agents are in `internal/agent`; durable abstract embeddings are in `internal/abstractindex`; persistence contracts are in `migrations/` plus `internal/storage/postgres/queries.sql`.
 
 ## Working safely
 
@@ -47,3 +47,10 @@ just reindex
 - Pass `context.Context` through network, database, and worker operations; bound external calls with configured timeouts.
 - Use the existing structured logger and avoid logging secrets, full prompts, or document bodies.
 - Prefer existing resilience, queue, embedding, and storage helpers over duplicate implementations.
+
+## Hardening invariants
+
+- Redis Streams is the only worker queue; startup fails when Redis or its consumer group cannot be used.
+- Qdrant reindexing uses a durable PostgreSQL activation intent and idempotent reconciliation. Never describe this as cross-database atomicity, and never delete the previous active collection during activation.
+- The accelerator gate and provider concurrency settings are bounded independently; defaults serialize GPU-heavy work for a single local GPU.
+- Logging managers are explicitly owned by application bootstrap and passed through contexts. Do not add process-wide logger installation or package-level mutable logger state.

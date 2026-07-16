@@ -26,14 +26,15 @@ type Client struct {
 	policy     *httpresilience.Policy
 }
 
-func NewClient(cfg config.SemanticScholarConfig) *Client {
+// NewClient constructs a Semantic Scholar client with policy lifecycle logs owned by ctx.
+func NewClient(ctx context.Context, cfg config.SemanticScholarConfig) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
 		apiKey:  cfg.APIKey,
 		baseURL: cfg.BaseURL,
-		policy: httpresilience.New("semantic-scholar", httpresilience.Config{
+		policy: httpresilience.New(ctx, "semantic-scholar", httpresilience.Config{
 			MaxRetries: cfg.Resilience.MaxRetries, BaseBackoff: cfg.Resilience.BaseBackoff,
 			MaxBackoff: cfg.Resilience.MaxBackoff, FailureThreshold: cfg.Resilience.FailureThreshold,
 			OpenTimeout: cfg.Resilience.OpenTimeout,

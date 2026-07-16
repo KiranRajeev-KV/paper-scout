@@ -20,7 +20,7 @@ func (c *Config) Validate() error {
 	); err != nil {
 		return err
 	}
-	if c.Pipeline.UseRedisQueue && c.Database.Redis.WorkerPoolSize < c.Pipeline.WorkerPoolSize {
+	if c.Database.Redis.WorkerPoolSize < c.Pipeline.WorkerPoolSize {
 		return fmt.Errorf("database.redis.worker_pool_size must be at least pipeline.worker_pool_size when Redis queue is enabled")
 	}
 	return nil

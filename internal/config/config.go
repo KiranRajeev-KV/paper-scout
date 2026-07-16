@@ -210,7 +210,6 @@ type PipelineConfig struct {
 	MaxRetrievedChunks   int              `koanf:"max_retrieved_chunks"`
 	PDFIndexingTimeout   time.Duration    `koanf:"pdf_indexing_timeout"`
 	EmbeddingBatchSize   int              `koanf:"embedding_batch_size"`
-	UseRedisQueue        bool             `koanf:"use_redis_queue"`
 }
 
 type LoggingConfig struct {
