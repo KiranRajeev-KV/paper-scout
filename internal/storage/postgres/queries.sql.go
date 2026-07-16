@@ -57,6 +57,33 @@ func (q *Queries) AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) 
 	return err
 }
 
+const completeEmbeddingActivationIntent = `-- name: CompleteEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'completed', last_error = NULL, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+WHERE id = $1 RETURNING id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest
+`
+
+func (q *Queries) CompleteEmbeddingActivationIntent(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, completeEmbeddingActivationIntent, id)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
+}
+
 const completeEmbeddingCleanupTask = `-- name: CompleteEmbeddingCleanupTask :one
 UPDATE embedding_cleanup_tasks
 SET status = 'completed', attempts = attempts + 1, error_message = NULL, completed_at = NOW(), updated_at = NOW()
@@ -173,6 +200,51 @@ func (q *Queries) CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (in
 	return count, err
 }
 
+const createEmbeddingActivationIntent = `-- name: CreateEmbeddingActivationIntent :one
+INSERT INTO embedding_activation_intents (
+    generation_id, target_collection, alias_name, previous_collection,
+    expected_point_count, chunk_snapshot_digest, status, attempts, last_error
+) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, NULL)
+RETURNING id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest
+`
+
+type CreateEmbeddingActivationIntentParams struct {
+	GenerationID        uuid.UUID   `json:"generation_id"`
+	TargetCollection    string      `json:"target_collection"`
+	AliasName           string      `json:"alias_name"`
+	PreviousCollection  pgtype.Text `json:"previous_collection"`
+	ExpectedPointCount  pgtype.Int8 `json:"expected_point_count"`
+	ChunkSnapshotDigest pgtype.Text `json:"chunk_snapshot_digest"`
+}
+
+func (q *Queries) CreateEmbeddingActivationIntent(ctx context.Context, arg CreateEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, createEmbeddingActivationIntent,
+		arg.GenerationID,
+		arg.TargetCollection,
+		arg.AliasName,
+		arg.PreviousCollection,
+		arg.ExpectedPointCount,
+		arg.ChunkSnapshotDigest,
+	)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
+}
+
 const createEmbeddingCleanupTask = `-- name: CreateEmbeddingCleanupTask :one
 INSERT INTO embedding_cleanup_tasks (collection_name, point_id, topic_id, paper_id, chunk_id, reason)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -223,27 +295,24 @@ func (q *Queries) CreateEmbeddingCleanupTask(ctx context.Context, arg CreateEmbe
 
 const createEmbeddingGeneration = `-- name: CreateEmbeddingGeneration :one
 INSERT INTO embedding_generations (
-    provider, model, dimensions, instruction_version, indexing_version, collection_name, status
-) VALUES ($1, $2, $3, $4, $5, $6, 'building')
-ON CONFLICT (provider, model, dimensions, instruction_version, indexing_version) DO UPDATE SET
-    collection_name = EXCLUDED.collection_name,
-    status = CASE WHEN embedding_generations.status = 'active' THEN 'active' ELSE 'building' END,
-    error_message = NULL,
-    updated_at = NOW()
+    id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, 'building')
 RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
 `
 
 type CreateEmbeddingGenerationParams struct {
-	Provider           string `json:"provider"`
-	Model              string `json:"model"`
-	Dimensions         int32  `json:"dimensions"`
-	InstructionVersion string `json:"instruction_version"`
-	IndexingVersion    string `json:"indexing_version"`
-	CollectionName     string `json:"collection_name"`
+	ID                 uuid.UUID `json:"id"`
+	Provider           string    `json:"provider"`
+	Model              string    `json:"model"`
+	Dimensions         int32     `json:"dimensions"`
+	InstructionVersion string    `json:"instruction_version"`
+	IndexingVersion    string    `json:"indexing_version"`
+	CollectionName     string    `json:"collection_name"`
 }
 
 func (q *Queries) CreateEmbeddingGeneration(ctx context.Context, arg CreateEmbeddingGenerationParams) (*EmbeddingGeneration, error) {
 	row := q.db.QueryRow(ctx, createEmbeddingGeneration,
+		arg.ID,
 		arg.Provider,
 		arg.Model,
 		arg.Dimensions,
@@ -564,6 +633,38 @@ func (q *Queries) DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePap
 	return items, nil
 }
 
+const failEmbeddingActivationIntent = `-- name: FailEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'failed', last_error = $2, updated_at = NOW()
+WHERE id = $1 RETURNING id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest
+`
+
+type FailEmbeddingActivationIntentParams struct {
+	ID        uuid.UUID   `json:"id"`
+	LastError pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) FailEmbeddingActivationIntent(ctx context.Context, arg FailEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, failEmbeddingActivationIntent, arg.ID, arg.LastError)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
+}
+
 const failEmbeddingCleanupTask = `-- name: FailEmbeddingCleanupTask :one
 UPDATE embedding_cleanup_tasks
 SET status = 'failed', attempts = attempts + 1, error_message = $2, updated_at = NOW()
@@ -592,6 +693,39 @@ func (q *Queries) FailEmbeddingCleanupTask(ctx context.Context, arg FailEmbeddin
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+	)
+	return &i, err
+}
+
+const failEmbeddingGeneration = `-- name: FailEmbeddingGeneration :one
+UPDATE embedding_generations
+SET status = 'failed', error_message = $2, updated_at = NOW()
+WHERE id = $1 AND status IN ('building', 'ready')
+RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
+`
+
+type FailEmbeddingGenerationParams struct {
+	ID           uuid.UUID   `json:"id"`
+	ErrorMessage pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) FailEmbeddingGeneration(ctx context.Context, arg FailEmbeddingGenerationParams) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, failEmbeddingGeneration, arg.ID, arg.ErrorMessage)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
 	)
 	return &i, err
 }
@@ -734,28 +868,37 @@ func (q *Queries) GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.
 	return items, nil
 }
 
-const getEmbeddingGenerationByIdentity = `-- name: GetEmbeddingGenerationByIdentity :one
-SELECT id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at FROM embedding_generations
-WHERE provider = $1 AND model = $2 AND dimensions = $3
-  AND instruction_version = $4 AND indexing_version = $5
+const getEmbeddingActivationIntent = `-- name: GetEmbeddingActivationIntent :one
+SELECT id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest FROM embedding_activation_intents WHERE id = $1
 `
 
-type GetEmbeddingGenerationByIdentityParams struct {
-	Provider           string `json:"provider"`
-	Model              string `json:"model"`
-	Dimensions         int32  `json:"dimensions"`
-	InstructionVersion string `json:"instruction_version"`
-	IndexingVersion    string `json:"indexing_version"`
+func (q *Queries) GetEmbeddingActivationIntent(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, getEmbeddingActivationIntent, id)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
 }
 
-func (q *Queries) GetEmbeddingGenerationByIdentity(ctx context.Context, arg GetEmbeddingGenerationByIdentityParams) (*EmbeddingGeneration, error) {
-	row := q.db.QueryRow(ctx, getEmbeddingGenerationByIdentity,
-		arg.Provider,
-		arg.Model,
-		arg.Dimensions,
-		arg.InstructionVersion,
-		arg.IndexingVersion,
-	)
+const getEmbeddingGeneration = `-- name: GetEmbeddingGeneration :one
+SELECT id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at FROM embedding_generations WHERE id = $1
+`
+
+func (q *Queries) GetEmbeddingGeneration(ctx context.Context, id uuid.UUID) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, getEmbeddingGeneration, id)
 	var i EmbeddingGeneration
 	err := row.Scan(
 		&i.ID,
@@ -1128,6 +1271,34 @@ func (q *Queries) GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.
 	return items, nil
 }
 
+const getPendingEmbeddingActivationIntent = `-- name: GetPendingEmbeddingActivationIntent :one
+SELECT id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest FROM embedding_activation_intents
+WHERE status IN ('pending', 'alias_switched', 'failed')
+ORDER BY created_at
+LIMIT 1
+`
+
+func (q *Queries) GetPendingEmbeddingActivationIntent(ctx context.Context) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, getPendingEmbeddingActivationIntent)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
+}
+
 const getPipelineStage = `-- name: GetPipelineStage :one
 SELECT id, run_id, topic_id, stage, status, output, attempt, started_at, completed_at, error_message, created_at, updated_at FROM pipeline_stage_checkpoints
 WHERE run_id = $1 AND stage = $2
@@ -1489,6 +1660,66 @@ func (q *Queries) LockPaperChunksForEmbeddingActivation(ctx context.Context) err
 	return err
 }
 
+const markEmbeddingActivationAliasSwitched = `-- name: MarkEmbeddingActivationAliasSwitched :one
+UPDATE embedding_activation_intents
+SET status = 'alias_switched', attempts = attempts + 1, last_error = NULL, updated_at = NOW()
+WHERE id = $1 RETURNING id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest
+`
+
+func (q *Queries) MarkEmbeddingActivationAliasSwitched(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, markEmbeddingActivationAliasSwitched, id)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
+	)
+	return &i, err
+}
+
+const markEmbeddingGenerationReady = `-- name: MarkEmbeddingGenerationReady :one
+UPDATE embedding_generations
+SET status = 'ready', indexed_chunks = $2, error_message = NULL, updated_at = NOW()
+WHERE id = $1 AND status = 'building'
+RETURNING id, provider, model, dimensions, instruction_version, indexing_version, collection_name, status, indexed_chunks, error_message, created_at, activated_at, updated_at
+`
+
+type MarkEmbeddingGenerationReadyParams struct {
+	ID            uuid.UUID `json:"id"`
+	IndexedChunks int64     `json:"indexed_chunks"`
+}
+
+func (q *Queries) MarkEmbeddingGenerationReady(ctx context.Context, arg MarkEmbeddingGenerationReadyParams) (*EmbeddingGeneration, error) {
+	row := q.db.QueryRow(ctx, markEmbeddingGenerationReady, arg.ID, arg.IndexedChunks)
+	var i EmbeddingGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.Provider,
+		&i.Model,
+		&i.Dimensions,
+		&i.InstructionVersion,
+		&i.IndexingVersion,
+		&i.CollectionName,
+		&i.Status,
+		&i.IndexedChunks,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.ActivatedAt,
+		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
 const markPaperChunkEmbeddingIndexing = `-- name: MarkPaperChunkEmbeddingIndexing :one
 UPDATE paper_chunks
 SET embedding_status = 'indexing',
@@ -1671,6 +1902,38 @@ func (q *Queries) StartPipelineStage(ctx context.Context, arg StartPipelineStage
 		&i.ErrorMessage,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return &i, err
+}
+
+const supersedeEmbeddingActivationIntent = `-- name: SupersedeEmbeddingActivationIntent :one
+UPDATE embedding_activation_intents
+SET status = 'superseded', last_error = $2, updated_at = NOW()
+WHERE id = $1 RETURNING id, generation_id, target_collection, alias_name, previous_collection, status, attempts, last_error, created_at, updated_at, completed_at, expected_point_count, chunk_snapshot_digest
+`
+
+type SupersedeEmbeddingActivationIntentParams struct {
+	ID        uuid.UUID   `json:"id"`
+	LastError pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) SupersedeEmbeddingActivationIntent(ctx context.Context, arg SupersedeEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error) {
+	row := q.db.QueryRow(ctx, supersedeEmbeddingActivationIntent, arg.ID, arg.LastError)
+	var i EmbeddingActivationIntent
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.TargetCollection,
+		&i.AliasName,
+		&i.PreviousCollection,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.ExpectedPointCount,
+		&i.ChunkSnapshotDigest,
 	)
 	return &i, err
 }

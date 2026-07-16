@@ -13,10 +13,12 @@ import (
 type Querier interface {
 	ActivateEmbeddingGeneration(ctx context.Context, id uuid.UUID) (*EmbeddingGeneration, error)
 	AddPaperAuthor(ctx context.Context, arg AddPaperAuthorParams) error
+	CompleteEmbeddingActivationIntent(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error)
 	CompleteEmbeddingCleanupTask(ctx context.Context, id uuid.UUID) (*EmbeddingCleanupTask, error)
 	CompletePaperChunkEmbedding(ctx context.Context, arg CompletePaperChunkEmbeddingParams) (*PaperChunk, error)
 	CompletePipelineStage(ctx context.Context, arg CompletePipelineStageParams) (*PipelineStageCheckpoint, error)
 	CountPapersByTopic(ctx context.Context, topicID uuid.UUID) (int64, error)
+	CreateEmbeddingActivationIntent(ctx context.Context, arg CreateEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error)
 	CreateEmbeddingCleanupTask(ctx context.Context, arg CreateEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error)
 	CreateEmbeddingGeneration(ctx context.Context, arg CreateEmbeddingGenerationParams) (*EmbeddingGeneration, error)
 	CreateNovelDirection(ctx context.Context, arg CreateNovelDirectionParams) (*NovelDirection, error)
@@ -26,12 +28,15 @@ type Querier interface {
 	DeletePapersByTopic(ctx context.Context, topicID uuid.UUID) error
 	DeleteResearchTopic(ctx context.Context, id uuid.UUID) error
 	DeleteStalePaperChunks(ctx context.Context, arg DeleteStalePaperChunksParams) ([]*PaperChunk, error)
+	FailEmbeddingActivationIntent(ctx context.Context, arg FailEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error)
 	FailEmbeddingCleanupTask(ctx context.Context, arg FailEmbeddingCleanupTaskParams) (*EmbeddingCleanupTask, error)
+	FailEmbeddingGeneration(ctx context.Context, arg FailEmbeddingGenerationParams) (*EmbeddingGeneration, error)
 	FailPipelineStage(ctx context.Context, arg FailPipelineStageParams) (*PipelineStageCheckpoint, error)
 	GetActiveEmbeddingGeneration(ctx context.Context) (*EmbeddingGeneration, error)
 	GetCompletedPaperChunks(ctx context.Context, arg GetCompletedPaperChunksParams) ([]*PaperChunk, error)
 	GetCompletedPaperIDsByTopic(ctx context.Context, topicID uuid.UUID) ([]uuid.UUID, error)
-	GetEmbeddingGenerationByIdentity(ctx context.Context, arg GetEmbeddingGenerationByIdentityParams) (*EmbeddingGeneration, error)
+	GetEmbeddingActivationIntent(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error)
+	GetEmbeddingGeneration(ctx context.Context, id uuid.UUID) (*EmbeddingGeneration, error)
 	GetNextPaperAuthorPosition(ctx context.Context, paperID uuid.UUID) (int32, error)
 	GetNovelDirection(ctx context.Context, id uuid.UUID) (*NovelDirection, error)
 	GetNovelDirectionsByTopic(ctx context.Context, topicID uuid.UUID) ([]*NovelDirection, error)
@@ -42,6 +47,7 @@ type Querier interface {
 	GetPaperDocument(ctx context.Context, paperID uuid.UUID) (*PaperDocument, error)
 	GetPapersByTopic(ctx context.Context, topicID uuid.UUID) ([]*Paper, error)
 	GetPapersByTopicForAnalysis(ctx context.Context, topicID uuid.UUID) ([]*GetPapersByTopicForAnalysisRow, error)
+	GetPendingEmbeddingActivationIntent(ctx context.Context) (*EmbeddingActivationIntent, error)
 	GetPipelineStage(ctx context.Context, arg GetPipelineStageParams) (*PipelineStageCheckpoint, error)
 	GetPipelineStages(ctx context.Context, runID uuid.UUID) ([]*PipelineStageCheckpoint, error)
 	GetResearchGap(ctx context.Context, id uuid.UUID) (*ResearchGap, error)
@@ -53,10 +59,13 @@ type Querier interface {
 	ListRecoverableResearchTopics(ctx context.Context) ([]*ResearchTopic, error)
 	ListResearchTopics(ctx context.Context, arg ListResearchTopicsParams) ([]*ResearchTopic, error)
 	LockPaperChunksForEmbeddingActivation(ctx context.Context) error
+	MarkEmbeddingActivationAliasSwitched(ctx context.Context, id uuid.UUID) (*EmbeddingActivationIntent, error)
+	MarkEmbeddingGenerationReady(ctx context.Context, arg MarkEmbeddingGenerationReadyParams) (*EmbeddingGeneration, error)
 	MarkPaperChunkEmbeddingIndexing(ctx context.Context, arg MarkPaperChunkEmbeddingIndexingParams) (*PaperChunk, error)
 	MarkPaperChunkForActiveGeneration(ctx context.Context, arg MarkPaperChunkForActiveGenerationParams) (*PaperChunk, error)
 	RetireActiveEmbeddingGenerations(ctx context.Context, id uuid.UUID) error
 	StartPipelineStage(ctx context.Context, arg StartPipelineStageParams) (*PipelineStageCheckpoint, error)
+	SupersedeEmbeddingActivationIntent(ctx context.Context, arg SupersedeEmbeddingActivationIntentParams) (*EmbeddingActivationIntent, error)
 	UpdateEmbeddingGenerationProgress(ctx context.Context, arg UpdateEmbeddingGenerationProgressParams) (*EmbeddingGeneration, error)
 	UpdatePaperAnalysis(ctx context.Context, arg UpdatePaperAnalysisParams) error
 	UpdatePaperChunkEmbeddingStatus(ctx context.Context, arg UpdatePaperChunkEmbeddingStatusParams) (*PaperChunk, error)

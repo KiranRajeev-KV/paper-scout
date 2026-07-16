@@ -19,6 +19,22 @@ type Author struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
+type EmbeddingActivationIntent struct {
+	ID                  uuid.UUID          `json:"id"`
+	GenerationID        uuid.UUID          `json:"generation_id"`
+	TargetCollection    string             `json:"target_collection"`
+	AliasName           string             `json:"alias_name"`
+	PreviousCollection  pgtype.Text        `json:"previous_collection"`
+	Status              string             `json:"status"`
+	Attempts            int32              `json:"attempts"`
+	LastError           pgtype.Text        `json:"last_error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt         pgtype.Timestamptz `json:"completed_at"`
+	ExpectedPointCount  pgtype.Int8        `json:"expected_point_count"`
+	ChunkSnapshotDigest pgtype.Text        `json:"chunk_snapshot_digest"`
+}
+
 type EmbeddingCleanupTask struct {
 	ID             uuid.UUID          `json:"id"`
 	CollectionName string             `json:"collection_name"`

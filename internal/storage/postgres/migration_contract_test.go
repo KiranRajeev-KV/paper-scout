@@ -107,3 +107,65 @@ func TestInitialMigrationDelimitsTriggerFunction(t *testing.T) {
 		t.Fatal("initial PL/pgSQL trigger function must be inside a Goose statement block")
 	}
 }
+
+// Protects recoverable generations use distinct collections and durable validation facts.
+func TestRecoverableEmbeddingGenerationMigration(t *testing.T) {
+	sql, err := os.ReadFile("../../../migrations/010_recoverable_embedding_generations.sql")
+	if err != nil {
+		t.Fatalf("read recoverable generation migration: %v", err)
+	}
+	upAt := strings.Index(string(sql), "-- +goose Up")
+	downAt := strings.Index(string(sql), "-- +goose Down")
+	if upAt < 0 || downAt < upAt {
+		t.Fatal("recoverable generation migration is missing Goose direction blocks")
+	}
+	up := string(sql[upAt:downAt])
+	for _, statement := range []string{
+		"DROP CONSTRAINT IF EXISTS embedding_generations_provider_model_dimensions_instruction_version_indexing_version_key",
+		"'ready'",
+		"expected_point_count BIGINT",
+		"chunk_snapshot_digest TEXT",
+		"'alias_switched'",
+	} {
+		if !strings.Contains(up, statement) {
+			t.Fatalf("recoverable generation migration is missing %q", statement)
+		}
+	}
+}
+
+// Protects recoverable generation rollback normalizes newer rows before legacy constraints return.
+func TestRecoverableEmbeddingGenerationRollbackNormalizesNewerRows(t *testing.T) {
+	sql, err := os.ReadFile("../../../migrations/010_recoverable_embedding_generations.sql")
+	if err != nil {
+		t.Fatalf("read recoverable generation migration: %v", err)
+	}
+	downAt := strings.Index(string(sql), "-- +goose Down")
+	if downAt < 0 {
+		t.Fatal("recoverable generation migration is missing a Goose Down block")
+	}
+	down := string(sql[downAt:])
+	readyAt := strings.Index(down, "WHERE status = 'ready'")
+	duplicatesAt := strings.Index(down, "row_number() OVER")
+	constraintAt := strings.Index(down, "ADD CONSTRAINT embedding_generations_status_check")
+	uniqueAt := strings.Index(down, "embedding_generations_provider_model_dimensions_instruction_version_indexing_version_key")
+	if readyAt < 0 || duplicatesAt < readyAt || constraintAt < duplicatesAt || uniqueAt < constraintAt {
+		t.Fatal("recoverable generation rollback must normalize ready and duplicate rows before restoring legacy constraints")
+	}
+}
+
+// Protects stale activation intents become non-retryable after their target is discarded.
+func TestSupersededActivationIntentMigration(t *testing.T) {
+	sql, err := os.ReadFile("../../../migrations/011_superseded_embedding_activation_intents.sql")
+	if err != nil {
+		t.Fatalf("read superseded activation migration: %v", err)
+	}
+	upAt := strings.Index(string(sql), "-- +goose Up")
+	downAt := strings.Index(string(sql), "-- +goose Down")
+	if upAt < 0 || downAt < upAt {
+		t.Fatal("superseded activation migration is missing Goose direction blocks")
+	}
+	up := string(sql[upAt:downAt])
+	if !strings.Contains(up, "'superseded'") || !strings.Contains(up, "WHERE status IN ('pending', 'alias_switched', 'failed')") {
+		t.Fatal("superseded activation migration must remove discarded intents from reconciliation")
+	}
+}
