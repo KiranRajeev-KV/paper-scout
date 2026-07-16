@@ -8,12 +8,49 @@ import (
 	"testing"
 	"time"
 
+	redispkg "github.com/paper-scout/internal/storage/redis"
 	"github.com/paper-scout/internal/worker"
 )
 
+type analyzerTestQueue struct{ jobs chan redispkg.Job }
+
+func newAnalyzerTestPool(workers int) *worker.Pool {
+	pool, err := worker.NewRedisPool(context.Background(), workers, &analyzerTestQueue{jobs: make(chan redispkg.Job, 128)})
+	if err != nil {
+		panic(err)
+	}
+	return pool
+}
+
+func (q *analyzerTestQueue) EnsureGroup(context.Context) error { return nil }
+func (q *analyzerTestQueue) Enqueue(ctx context.Context, job redispkg.Job) error {
+	select {
+	case q.jobs <- job:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (q *analyzerTestQueue) Dequeue(ctx context.Context, _ string, _ time.Duration) (*redispkg.Job, error) {
+	select {
+	case job := <-q.jobs:
+		job.StreamID = job.ID
+		return &job, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (*analyzerTestQueue) Complete(context.Context, string) error { return nil }
+func (*analyzerTestQueue) Fail(_ context.Context, job redispkg.Job, _ string) (redispkg.FailResult, error) {
+	return redispkg.FailResult{Terminal: true}, nil
+}
+func (q *analyzerTestQueue) QueueDepth(context.Context) (int64, error) {
+	return int64(len(q.jobs)), nil
+}
+
 // Protects analyzer analyze waits for worker completion.
 func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
-	pool := worker.NewPool(2, 8)
+	pool := newAnalyzerTestPool(2)
 	analyzer := NewAnalyzer(nil, nil, pool)
 
 	var mu sync.Mutex
@@ -32,7 +69,9 @@ func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 	}
 
 	pool.SetHandler(analyzer.HandleJob)
-	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	pool.SetCompletionHook(func(_ context.Context, job worker.Job, err error, terminal bool) {
+		analyzer.HandleJobCompletion(job, err, terminal)
+	})
 	if err := pool.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +103,9 @@ func TestAnalyzerAnalyzeWaitsForWorkerCompletion(t *testing.T) {
 	}
 }
 
-// Protects analysis jobs from consuming their timeout while queued behind another LLM request.
-func TestAnalyzerAnalyzeSerializesLLMJobs(t *testing.T) {
-	pool := worker.NewPool(3, 8)
+// Protects analysis jobs from being dispatched serially by the analyzer.
+func TestAnalyzerAnalyzeDispatchesBatchConcurrently(t *testing.T) {
+	pool := newAnalyzerTestPool(3)
 	analyzer := NewAnalyzer(nil, nil, pool)
 
 	var mu sync.Mutex
@@ -88,7 +127,9 @@ func TestAnalyzerAnalyzeSerializesLLMJobs(t *testing.T) {
 	analyzer.storeFn = func(context.Context, string, string, *PaperAnalysis) error { return nil }
 
 	pool.SetHandler(analyzer.HandleJob)
-	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	pool.SetCompletionHook(func(_ context.Context, job worker.Job, err error, terminal bool) {
+		analyzer.HandleJobCompletion(job, err, terminal)
+	})
 	if err := pool.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -102,14 +143,14 @@ func TestAnalyzerAnalyzeSerializesLLMJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze returned error: %v", err)
 	}
-	if peak != 1 {
-		t.Fatalf("peak active analyses = %d, want 1", peak)
+	if peak < 2 {
+		t.Fatalf("peak active analyses = %d, want concurrent dispatch", peak)
 	}
 }
 
 // Protects analyzer analyze returns typed batch error after paper failures.
 func TestAnalyzerAnalyzeReturnsTypedBatchErrorAfterPaperFailures(t *testing.T) {
-	pool := worker.NewPool(1, 4)
+	pool := newAnalyzerTestPool(1)
 	analyzer := NewAnalyzer(nil, nil, pool)
 
 	var mu sync.Mutex
@@ -130,7 +171,9 @@ func TestAnalyzerAnalyzeReturnsTypedBatchErrorAfterPaperFailures(t *testing.T) {
 	}
 
 	pool.SetHandler(analyzer.HandleJob)
-	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	pool.SetCompletionHook(func(_ context.Context, job worker.Job, err error, terminal bool) {
+		analyzer.HandleJobCompletion(job, err, terminal)
+	})
 	if err := pool.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +214,7 @@ func TestAnalyzerAnalyzeReturnsTypedBatchErrorAfterPaperFailures(t *testing.T) {
 
 // Protects analyzer analyze empty batch returns immediately.
 func TestAnalyzerAnalyzeEmptyBatchReturnsImmediately(t *testing.T) {
-	pool := worker.NewPool(1, 1)
+	pool := newAnalyzerTestPool(1)
 	analyzer := NewAnalyzer(nil, nil, pool)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -183,7 +226,7 @@ func TestAnalyzerAnalyzeEmptyBatchReturnsImmediately(t *testing.T) {
 
 // Protects multiple analysis batches.
 func TestMultipleAnalysisBatches(t *testing.T) {
-	pool := worker.NewPool(2, 8)
+	pool := newAnalyzerTestPool(2)
 	analyzer := NewAnalyzer(nil, nil, pool)
 	analyzer.analyzeFn = func(context.Context, string, string, string) (*PaperAnalysis, error) {
 		time.Sleep(5 * time.Millisecond)
@@ -191,7 +234,9 @@ func TestMultipleAnalysisBatches(t *testing.T) {
 	}
 	analyzer.storeFn = func(context.Context, string, string, *PaperAnalysis) error { return nil }
 	pool.SetHandler(analyzer.HandleJob)
-	pool.SetCompletionHook(analyzer.HandleJobCompletion)
+	pool.SetCompletionHook(func(_ context.Context, job worker.Job, err error, terminal bool) {
+		analyzer.HandleJobCompletion(job, err, terminal)
+	})
 	if err := pool.Start(); err != nil {
 		t.Fatal(err)
 	}
