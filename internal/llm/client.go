@@ -34,12 +34,13 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 
 	retry := NewRetryPolicy(cfg.MaxRetries, cfg.BaseBackoff, cfg.MaxBackoff)
 
+	appLog := *logger.From(ctx)
 	cb := circuitbreaker.New("gemini", circuitbreaker.Config{
 		FailureThreshold: 5,
 		SuccessThreshold: 2,
 		OpenTimeout:      60 * time.Second,
 		OnStateChange: func(name string, from, to circuitbreaker.State) {
-			logger.Warn().
+			appLog.Warn().
 				Str("name", name).
 				Str("from", from.String()).
 				Str("to", to.String()).
@@ -50,13 +51,13 @@ func NewClient(ctx context.Context, cfg config.LLMConfig) (*Client, error) {
 	var rateLimiter *LLMRateLimiter
 	if cfg.RequestsPerMinute > 0 && cfg.RequestsPerDay > 0 {
 		rateLimiter = NewLLMRateLimiter(cfg.RequestsPerMinute, cfg.RequestsPerDay)
-		logger.Info().
+		logger.From(ctx).Info().
 			Int("rpm", cfg.RequestsPerMinute).
 			Int("rpd", cfg.RequestsPerDay).
 			Msg("LLM rate limiter initialized")
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("model", cfg.Model).
 		Int("max_output_tokens", cfg.MaxOutputTokens).
 		Msg("Connected to Gemini LLM")
@@ -135,7 +136,7 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 				}
 			}
 
-			logger.Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling generation provider")
+			logger.From(ctx).Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling generation provider")
 			resp, err := c.generateContent(attemptCtx, c.model, contents, genConfig)
 			if err != nil {
 				return err
@@ -158,7 +159,7 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	}
 
 	if usage != nil {
-		logger.Debug().
+		logger.From(ctx).Debug().
 			Int("input_tokens", usage.InputTokens).
 			Int("output_tokens", usage.OutputTokens).
 			Msg("LLM generate complete")
@@ -188,7 +189,7 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 				requestConfig.MaxOutputTokens = int32(c.config.MaxOutputTokens)
 			}
 
-			logger.Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling structured generation provider")
+			logger.From(ctx).Debug().Str("provider", "gemini").Str("model", c.model).Int("attempt", attempt).Msg("Calling structured generation provider")
 			resp, err := c.generateContent(attemptCtx, c.model, contents, &requestConfig)
 			if err != nil {
 				return err
@@ -211,7 +212,7 @@ func (c *Client) GenerateWithConfig(ctx context.Context, prompt string, cfg *gen
 	}
 
 	if usage != nil {
-		logger.Debug().
+		logger.From(ctx).Debug().
 			Int("input_tokens", usage.InputTokens).
 			Int("output_tokens", usage.OutputTokens).
 			Msg("LLM generate with config complete")

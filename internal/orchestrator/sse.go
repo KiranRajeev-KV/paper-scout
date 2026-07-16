@@ -1,21 +1,27 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 
 	"github.com/paper-scout/internal/logger"
+	"github.com/rs/zerolog"
 )
 
+// SSEManager coordinates non-blocking event delivery to topic subscribers.
 type SSEManager struct {
 	clients map[string]map[chan []byte]struct{}
 	closed  bool
 	mu      sync.RWMutex
+	log     zerolog.Logger
 }
 
-func NewSSEManager() *SSEManager {
+// NewSSEManager constructs an SSE manager that writes lifecycle events through ctx's logger.
+func NewSSEManager(ctx context.Context) *SSEManager {
 	return &SSEManager{
 		clients: make(map[string]map[chan []byte]struct{}),
+		log:     *logger.From(ctx),
 	}
 }
 
@@ -34,7 +40,7 @@ func (s *SSEManager) Subscribe(topicID string) chan []byte {
 
 	s.clients[topicID][ch] = struct{}{}
 
-	logger.Debug().Str("topic_id", topicID).Int("subscribers", len(s.clients[topicID])).Msg("SSE client subscribed")
+	s.log.Debug().Str("topic_id", topicID).Int("subscribers", len(s.clients[topicID])).Msg("SSE client subscribed")
 
 	return ch
 }
@@ -72,7 +78,7 @@ func (s *SSEManager) Unsubscribe(topicID string, ch chan []byte) {
 		}
 	}
 
-	logger.Debug().Str("topic_id", topicID).Msg("SSE client unsubscribed")
+	s.log.Debug().Str("topic_id", topicID).Msg("SSE client unsubscribed")
 }
 
 func (s *SSEManager) Broadcast(event interface{}) {
@@ -91,7 +97,7 @@ func (s *SSEManager) Broadcast(event interface{}) {
 	}
 
 	if err := s.Send(topicID, eventType, event); err != nil {
-		logger.Warn().Err(err).Msg("Failed to marshal SSE event")
+		s.log.Warn().Err(err).Msg("Failed to marshal SSE event")
 	}
 }
 
@@ -111,7 +117,7 @@ func (s *SSEManager) Send(topicID, eventType string, event interface{}) error {
 		select {
 		case ch <- []byte(message):
 		default:
-			logger.Warn().Str("topic_id", topicID).Msg("SSE channel full, dropping message")
+			s.log.Warn().Str("topic_id", topicID).Msg("SSE channel full, dropping message")
 		}
 	}
 	return nil
@@ -131,7 +137,7 @@ func (s *SSEManager) BroadcastToAll(event interface{}) {
 
 	data, err := json.Marshal(event)
 	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to marshal SSE event")
+		s.log.Warn().Err(err).Msg("Failed to marshal SSE event")
 		return
 	}
 

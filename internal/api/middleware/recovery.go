@@ -11,7 +11,7 @@ func Recovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
-				logger.Error().
+				logger.From(c.Request.Context()).Error().
 					Interface("error", err).
 					Str("path", c.Request.URL.Path).
 					Str("method", c.Request.Method).

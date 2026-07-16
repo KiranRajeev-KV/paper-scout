@@ -1,14 +1,21 @@
 package middleware
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/paper-scout/internal/logger"
+	"github.com/rs/zerolog"
 )
 
-func Logger() gin.HandlerFunc {
+// Logger attaches the application logger to each request before recording its outcome.
+func Logger(app *zerolog.Logger) (gin.HandlerFunc, error) {
+	if app == nil {
+		return nil, fmt.Errorf("request logger requires an application logger")
+	}
 	return func(c *gin.Context) {
+		c.Request = c.Request.WithContext(app.WithContext(c.Request.Context()))
 		start := time.Now()
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
@@ -22,12 +29,13 @@ func Logger() gin.HandlerFunc {
 			path = path + "?" + query
 		}
 
-		event := logger.Info()
+		requestContext := c.Request.Context()
+		event := logger.From(requestContext).Info()
 		if status >= 400 {
-			event = logger.Warn()
+			event = logger.From(requestContext).Warn()
 		}
 		if status >= 500 {
-			event = logger.Error()
+			event = logger.From(requestContext).Error()
 		}
 
 		event.
@@ -37,5 +45,5 @@ func Logger() gin.HandlerFunc {
 			Dur("latency", latency).
 			Str("client_ip", c.ClientIP()).
 			Msg("HTTP request")
-	}
+	}, nil
 }

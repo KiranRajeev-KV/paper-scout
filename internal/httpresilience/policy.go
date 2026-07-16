@@ -16,6 +16,7 @@ import (
 
 	"github.com/paper-scout/internal/circuitbreaker"
 	"github.com/paper-scout/internal/logger"
+	"github.com/rs/zerolog"
 )
 
 type Config struct {
@@ -39,15 +40,18 @@ type Observer interface {
 	Observe(Event)
 }
 
+// Policy applies retry, throttling, and circuit-breaking to outbound HTTP requests.
 type Policy struct {
 	config      Config
 	limiter     *TokenBucket
 	breaker     *circuitbreaker.CircuitBreaker
 	observer    Observer
 	serviceName string
+	log         zerolog.Logger
 }
 
-func New(serviceName string, cfg Config, requestsPerSecond float64, burst int, observer Observer) *Policy {
+// New constructs a request policy with lifecycle logs owned by ctx.
+func New(ctx context.Context, serviceName string, cfg Config, requestsPerSecond float64, burst int, observer Observer) *Policy {
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 0
 	}
@@ -63,34 +67,22 @@ func New(serviceName string, cfg Config, requestsPerSecond float64, burst int, o
 	if cfg.OpenTimeout <= 0 {
 		cfg.OpenTimeout = 30 * time.Second
 	}
-	if observer == nil {
-		observer = structuredLogger{}
-	}
-
-	return &Policy{
+	policy := &Policy{
 		config:      cfg,
 		limiter:     NewTokenBucket(requestsPerSecond, burst),
 		serviceName: serviceName,
 		observer:    observer,
-		breaker: circuitbreaker.New(serviceName, circuitbreaker.Config{
-			FailureThreshold: cfg.FailureThreshold,
-			SuccessThreshold: 2,
-			OpenTimeout:      cfg.OpenTimeout,
-			OnStateChange: func(name string, from, to circuitbreaker.State) {
-				logger.Warn().Str("service", name).Str("from", from.String()).Str("to", to.String()).Msg("Circuit breaker state changed")
-			},
-		}),
+		log:         *logger.From(ctx),
 	}
-}
-
-type structuredLogger struct{}
-
-func (structuredLogger) Observe(event Event) {
-	entry := logger.Debug().Str("operation", event.Operation).Str("event", event.Kind).Int("attempt", event.Attempt).Int("status", event.Status).Dur("duration", event.Duration)
-	if event.Err != nil {
-		entry = entry.Err(event.Err)
-	}
-	entry.Msg("HTTP resilience event")
+	policy.breaker = circuitbreaker.New(serviceName, circuitbreaker.Config{
+		FailureThreshold: cfg.FailureThreshold,
+		SuccessThreshold: 2,
+		OpenTimeout:      cfg.OpenTimeout,
+		OnStateChange: func(name string, from, to circuitbreaker.State) {
+			policy.log.Warn().Str("service", name).Str("from", from.String()).Str("to", to.String()).Msg("Circuit breaker state changed")
+		},
+	})
+	return policy
 }
 
 func (p *Policy) Do(ctx context.Context, operation string, request func(context.Context) (*http.Response, error)) (*http.Response, error) {
@@ -103,11 +95,11 @@ func (p *Policy) Do(ctx context.Context, operation string, request func(context.
 				return err
 			}
 			if waited := time.Since(waitStarted); waited >= time.Millisecond {
-				p.observe(Event{Operation: operation, Kind: "throttle", Attempt: attempt + 1, Duration: waited})
+				p.observe(ctx, Event{Operation: operation, Kind: "throttle", Attempt: attempt + 1, Duration: waited})
 			}
 			started := time.Now()
 			response, err = request(ctx)
-			p.observe(Event{Operation: operation, Kind: "request", Attempt: attempt + 1, Status: responseStatus(response), Duration: time.Since(started), Err: err})
+			p.observe(ctx, Event{Operation: operation, Kind: "request", Attempt: attempt + 1, Status: responseStatus(response), Duration: time.Since(started), Err: err})
 
 			if err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 				return nil
@@ -131,7 +123,7 @@ func (p *Policy) Do(ctx context.Context, operation string, request func(context.
 				_ = response.Body.Close()
 				response = nil
 			}
-			p.observe(Event{Operation: operation, Kind: "retry", Attempt: attempt + 1, Duration: delay, Err: err})
+			p.observe(ctx, Event{Operation: operation, Kind: "retry", Attempt: attempt + 1, Duration: delay, Err: err})
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -141,7 +133,7 @@ func (p *Policy) Do(ctx context.Context, operation string, request func(context.
 		return err
 	})
 	if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
-		p.observe(Event{Operation: operation, Kind: "circuit_rejected", Err: err})
+		p.observe(ctx, Event{Operation: operation, Kind: "circuit_rejected", Err: err})
 	}
 	return response, err
 }
@@ -157,12 +149,17 @@ func (p *Policy) backoff(attempt int) time.Duration {
 	return delay + time.Duration(rand.Int64N(int64(delay/2)+1))
 }
 
-func (p *Policy) observe(event Event) {
+func (p *Policy) observe(ctx context.Context, event Event) {
 	if p.observer != nil {
 		p.observer.Observe(event)
 	}
+	entry := logger.From(ctx).Debug().Str("operation", event.Operation).Str("event", event.Kind).Int("attempt", event.Attempt).Int("status", event.Status).Dur("duration", event.Duration)
+	if event.Err != nil {
+		entry = entry.Err(event.Err)
+	}
+	entry.Msg("HTTP resilience event")
 	if event.Kind == "retry" {
-		logger.Warn().Str("service", p.serviceName).Str("operation", event.Operation).Int("attempt", event.Attempt).Dur("delay", event.Duration).Err(event.Err).Msg("HTTP request retrying")
+		logger.From(ctx).Warn().Str("service", p.serviceName).Str("operation", event.Operation).Int("attempt", event.Attempt).Dur("delay", event.Duration).Err(event.Err).Msg("HTTP request retrying")
 	}
 }
 

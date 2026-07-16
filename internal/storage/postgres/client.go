@@ -9,11 +9,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/paper-scout/internal/config"
 	"github.com/paper-scout/internal/logger"
+	"github.com/rs/zerolog"
 )
 
+// Client owns the PostgreSQL connection pool and generated query bindings.
 type Client struct {
 	pool    *pgxpool.Pool
 	queries *Queries
+	log     zerolog.Logger
 }
 
 func NewClient(ctx context.Context, cfg config.PostgresConfig) (*Client, error) {
@@ -42,7 +45,7 @@ func NewClient(ctx context.Context, cfg config.PostgresConfig) (*Client, error) 
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	logger.Info().
+	logger.From(ctx).Info().
 		Str("host", cfg.Host).
 		Int("port", cfg.Port).
 		Str("database", cfg.Database).
@@ -52,12 +55,13 @@ func NewClient(ctx context.Context, cfg config.PostgresConfig) (*Client, error) 
 	return &Client{
 		pool:    pool,
 		queries: New(pool),
+		log:     *logger.From(ctx),
 	}, nil
 }
 
 func (c *Client) Close() {
 	c.pool.Close()
-	logger.Info().Msg("PostgreSQL connection pool closed")
+	c.log.Info().Msg("PostgreSQL connection pool closed")
 }
 
 func (c *Client) Queries() *Queries {

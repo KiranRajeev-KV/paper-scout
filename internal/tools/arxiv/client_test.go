@@ -24,7 +24,7 @@ func TestExternalClientPoliciesRetryArXivRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(config.ArXivConfig{
+	client := NewClient(t.Context(), config.ArXivConfig{
 		BaseURL:    server.URL,
 		Timeout:    time.Second,
 		Resilience: config.ResilienceConfig{MaxRetries: 1, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond, FailureThreshold: 3, OpenTimeout: time.Second},

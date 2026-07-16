@@ -1,17 +1,28 @@
 package api
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/paper-scout/internal/api/handler"
 	"github.com/paper-scout/internal/api/middleware"
 	"github.com/paper-scout/internal/config"
+	"github.com/paper-scout/internal/logger"
 	"github.com/paper-scout/internal/orchestrator"
 )
 
-func SetupRouter(orch *orchestrator.Orchestrator, health *handler.HealthHandler, cfg config.ServerConfig) *gin.Engine {
+// SetupRouter constructs the HTTP router with explicit application-log ownership.
+func SetupRouter(orch *orchestrator.Orchestrator, health *handler.HealthHandler, cfg config.ServerConfig, logs *logger.Manager) (*gin.Engine, error) {
+	if logs == nil {
+		return nil, fmt.Errorf("router requires logging manager")
+	}
 	r := gin.New()
 
-	r.Use(middleware.Logger())
+	requestLogger, err := middleware.Logger(logs.App())
+	if err != nil {
+		return nil, err
+	}
+	r.Use(requestLogger)
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS(cfg.AllowedOrigins))
 
@@ -31,5 +42,5 @@ func SetupRouter(orch *orchestrator.Orchestrator, health *handler.HealthHandler,
 	r.GET("/health/live", health.Live)
 	r.GET("/health/ready", health.Check)
 
-	return r
+	return r, nil
 }

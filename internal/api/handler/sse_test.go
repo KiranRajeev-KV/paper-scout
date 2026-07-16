@@ -38,7 +38,7 @@ func TestSSESurvivesWriteTimeoutAndReplaysCurrentStatus(t *testing.T) {
 	topicID := "6dbf4af6-8ca3-4bb7-b621-c2f34fd72199"
 	service := &fakeResearchService{
 		pipeline: &orchestrator.Pipeline{TopicID: topicID, RunID: "run-1", Status: "processing", Stage: orchestrator.StageAnalysis, Progress: 0.4},
-		sse:      orchestrator.NewSSEManager(),
+		sse:      orchestrator.NewSSEManager(t.Context()),
 	}
 	handler := New(service)
 	handler.heartbeat = 10 * time.Millisecond
