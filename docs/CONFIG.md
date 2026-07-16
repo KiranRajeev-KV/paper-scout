@@ -31,7 +31,7 @@ Durations use Go syntax (`500ms`, `30s`, `2m`). `SERVER__ALLOWED_ORIGINS` is the
 | `DATABASE__REDIS__PASSWORD` | empty | Redis password. |
 | `DATABASE__REDIS__DB` | `0` | Redis logical database. |
 | `DATABASE__REDIS__POOL_SIZE` | `10` | Normal Redis client pool. |
-| `DATABASE__REDIS__WORKER_POOL_SIZE` | `10` | Connections reserved for blocking Stream consumers; at least the worker count when Redis queueing is enabled. |
+| `DATABASE__REDIS__WORKER_POOL_SIZE` | `10` | Connections reserved for blocking Redis Stream consumers; must be at least the worker count. |
 | `DATABASE__QDRANT__HOST/PORT` | `localhost` / `6334` | Qdrant gRPC endpoint. |
 | `DATABASE__QDRANT__ALIAS` | `paper_embeddings_current` | Stable alias for the active embedding generation. |
 | `DATABASE__QDRANT__COLLECTION_PREFIX` | `paper_embeddings` | Prefix for physical generation collections. |
@@ -69,6 +69,8 @@ Durations use Go syntax (`500ms`, `30s`, `2m`). `SERVER__ALLOWED_ORIGINS` is the
 | `ACCELERATOR__MAX_CONCURRENT` | `1` | Shared cap for Ollama and Docling GPU-memory work. |
 
 Changing any embedding identity field creates an incompatible generation. Run `just reindex` to build and activate a matching collection.
+
+The worker-pool size only controls how many Redis jobs can be claimed concurrently. GPU-heavy work is bounded separately by `ACCELERATOR__MAX_CONCURRENT`, `GENERATION__OLLAMA__CONCURRENCY`, `EMBEDDING__CONCURRENCY`, and `APIS__DOCLING__CONCURRENCY`. All four default to `1`, so analysis work can queue concurrently while one local GPU operation runs at a time. Increase the relevant limits deliberately on a larger GPU; the effective concurrency is the lowest applicable limit.
 
 When using the Compose `app` profile with Gemini, set `GEMINI_API_KEY` in the shell or `.env`; Compose maps it to `GENERATION__GEMINI__API_KEY` inside the container. For a locally run server, use `GENERATION__GEMINI__API_KEY` directly.
 
@@ -110,7 +112,8 @@ Each `RATE_LIMIT` block has `REQUESTS_PER_SECOND` and `BURST`. Each `RESILIENCE`
 | `PIPELINE__MAX_RETRIEVED_CHUNKS` | `12` | PDF chunks used as gap evidence. |
 | `PIPELINE__PDF_INDEXING_TIMEOUT` | `10m` | Deadline for a paper-indexing batch. |
 | `PIPELINE__EMBEDDING_BATCH_SIZE` | `10` | Chunks per embedding job. |
-| `PIPELINE__USE_REDIS_QUEUE` | `true` | Use Redis Streams instead of an in-memory queue. |
 | `LOGGING__LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
 | `LOGGING__FORMAT` | `console` | `console`, `json`, `development`, or `production`. |
 | `LOGGING__DIRECTORY` | `logs` | Directory for application/run logs. |
+
+Redis Streams is mandatory. There is no `PIPELINE__USE_REDIS_QUEUE` setting and no local queue fallback. `DATABASE__REDIS__WORKER_POOL_SIZE` must cover the configured workers because each blocking stream consumer needs a connection.
